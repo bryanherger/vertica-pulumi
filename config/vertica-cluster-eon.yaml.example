@@ -63,6 +63,16 @@ vertica:
     
   # Eon Mode specific settings
   eon:
+    # Database initialization action
+    # Options: Create or Revive
+    #   Create: Creates a new database (default)
+    #   Revive: Revives an existing database from S3 communal storage
+    #          (e.g., after cluster shutdown, or when moving to new nodes)
+    # IMPORTANT: For Revive, the database must already exist in the communal
+    # storage location. The revive process downloads catalog metadata from S3
+    # and rebuilds depots from scratch.
+    dbinit: Create
+
     # Communal storage location (S3 bucket path)
     # Format: s3://bucket-name/path
     communal_storage_location: "s3://my-vertica-communal-storage/analytics"
@@ -70,6 +80,8 @@ vertica:
     # Number of shards in the database
     # Recommended: Equal to or greater than the number of nodes initially
     # For 3 nodes, start with 3 shards. Can scale later.
+    # NOTE: When using Revive, shard_count is ignored - the existing shard
+    # count from the communal storage is used automatically.
     shard_count: 3
     
     # Depot path on each node (local storage for hot data caching)

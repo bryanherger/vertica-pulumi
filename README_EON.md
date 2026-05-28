@@ -152,7 +152,16 @@ vsql -U dbadmin -d analytics -h <primary-ip> -w "$VERTICA_PASSWORD"
 SELECT version();
 SELECT * FROM nodes;
 SELECT * FROM communal_storage;
+
+# ⚠️ IMPORTANT: After inserting data, sync to S3 to ensure persistence
+SELECT sync_catalog();
 ```
+
+### ⚠️ Data Persistence Warning
+
+**Always call `SELECT sync_catalog();` after inserting data!**
+
+Eon Mode writes to local depot first, then flushes to S3 asynchronously. If you destroy the cluster before data is synced, it will be lost. The installation script automatically syncs after database creation, but manual operations require explicit sync.
 
 ### 5. (Optional) Destroy When Done
 

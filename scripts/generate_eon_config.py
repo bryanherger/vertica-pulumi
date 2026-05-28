@@ -160,6 +160,17 @@ def generate_config_interactive() -> dict:
     print("-" * 40)
     
     config['vertica']['eon'] = {}
+    
+    # Database initialization action
+    dbinit = get_input(
+        "Database Initialization Action (Create/Revive)", "Create"
+    )
+    if dbinit.lower() not in ('create', 'revive'):
+        print(f"  Warning: Invalid action '{dbinit}', defaulting to 'Create'")
+        dbinit = "Create"
+    config['vertica']['eon']['dbinit'] = dbinit
+    print(f"  Selected: {dbinit}")
+    
     communal = get_input(
         "Communal Storage Location (s3://bucket/path)", required=True,
         validator=validate_s3_path,
@@ -244,6 +255,7 @@ def generate_config_from_args(args) -> dict:
                 'local_path': args.rpm_path
             },
             'eon': {
+                'dbinit': args.dbinit or 'Create',
                 'communal_storage_location': args.communal_storage,
                 'shard_count': args.shard_count,
                 'depot_path': '/data/depot',
@@ -341,6 +353,8 @@ def main():
     parser.add_argument("--rpm-path", required=False)
     parser.add_argument("--license-path", default="")
     parser.add_argument("--communal-storage", required=False)
+    parser.add_argument("--dbinit", default="Create",
+                        help="Database initialization action: Create or Revive")
     parser.add_argument("--shard-count", type=int, default=3)
     parser.add_argument("--depot-percent", type=int, default=80)
     parser.add_argument("--node-count", type=int, default=3)

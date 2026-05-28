@@ -140,7 +140,29 @@ Edit `config/config_eon.yaml` and update:
 - `vertica.eon.communal_storage_location`: Your S3 bucket path
 - `vertica.eon.aws_access_key_id` and `aws_secret_access_key`: **Only if NOT using IAM role** (leave empty for IAM instance profile)
 
-### 2. Deploy Infrastructure
+### 2. Database Initialization Action
+
+Set the initialization action:
+- **Create** (default): Creates a new database from scratch
+- **Revive**: Restores an existing database from S3 communal storage
+
+```yaml
+vertica:
+  eon:
+    dbinit: Create  # or Revive
+```
+
+**When to use Revive:**
+- Recovering from cluster shutdown
+- Migrating to new compute nodes
+- Restoring after infrastructure changes
+
+**Important for Revive:**
+- The database must already exist in the S3 communal storage location
+- Depot is rebuilt from scratch from communal storage data
+- Shard count is automatically determined from existing metadata (ignored in config)
+
+### 3. Deploy Infrastructure
 
 ```bash
 cd pulumi-vertica-cluster
@@ -164,7 +186,34 @@ This script will:
 3. Generate RSA keys and certificates
 4. Deploy certificates to all nodes
 5. Start NMA services
-6. Create the Eon Mode database
+6. **Create OR Revive** the Eon Mode database (based on `dbinit` setting)
+
+**For Revive mode**, the script will:
+- Skip shard count configuration (uses existing value from S3)
+- Download catalog metadata from communal storage
+- Rebuild depots from S3 data (this may take time for large databases)
+- Start the database with existing data intact
+
+### ⚠️ IMPORTANT: Data Persistence in Eon Mode
+
+Eon Mode writes data to **local depot** (SSD cache) first, then flushes to **S3 communal storage** asynchronously. Data is only persisted to S3 during:
+
+1. **Automatic checkpoints** (every 5 minutes by default)
+2. **Manual `sync_catalog()` call**
+3. **Graceful database shutdown**
+
+**Critical**: If you destroy the cluster immediately after data insertion (before checkpoint or sync), **data will be lost** because it remains in the local depot cache which is destroyed with the instances.
+
+**The installation script automatically calls `sync_catalog()` after database creation** to ensure initial setup is persisted. For manual operations, always call:
+
+```sql
+SELECT sync_catalog();
+```
+
+**Before destroying a cluster**, ensure data is synced:
+1. Run `SELECT sync_catalog();` in vsql
+2. Or gracefully stop the database: `adminTools -t stop_db -d dbname`
+3. Wait for S3 uploads to complete (check `aws s3 ls` for new files)
 
 ## Detailed Steps
 
@@ -233,8 +282,9 @@ vcluster create_db \
 
 | Setting | Description | Example |
 |---------|-------------|---------|
+| `dbinit` | Database initialization: `Create` or `Revive` | `Create` |
 | `communal_storage_location` | S3 path for data | `s3://bucket/db` |
-| `shard_count` | Number of shards | `3` (match node count) |
+| `shard_count` | Number of shards (ignored when `dbinit: Revive`) | `3` |
 | `depot_path` | Local cache directory | `/data/depot` |
 | `depot_size` | Cache size | `80%` or `200G` |
 | `aws_region` | S3 region | `us-east-2` |

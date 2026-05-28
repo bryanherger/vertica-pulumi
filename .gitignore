@@ -41,13 +41,15 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Config files with sensitive data - only track examples
+# Configuration files with sensitive data
+# Only track example/template files, not production configs
 config/*.yaml
 config/*.yml
 !config/*.example.yaml
 !config/*.example.yml
 !config/vertica-cluster.yaml.example
 !config/vertica-cluster-eon.yaml.example
+!config/sample-config.yaml
 
 # Temporary and log files
 *.log
