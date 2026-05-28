@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install flake8 pylint pytest
+    
+    - name: Lint with flake8
+      run: |
+        # Stop build on syntax errors or undefined names
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        # Treat all other errors as warnings
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+    
+    - name: Type check with pylint
+      run: |
+        pylint modules/ scripts/ __main__.py --exit-zero
+    
+    - name: Validate Python syntax
+      run: |
+        python -m py_compile __main__.py
+        python -m py_compile scripts/*.py
+        python -m py_compile modules/**/*.py
+    
+    - name: Check for hardcoded secrets
+      run: |
+        # Check for common password patterns
+        if grep -r "password.*=.*\".*\"" config/*.example.yaml scripts/*.py | grep -v "CHANGE_ME"; then
+          echo "WARNING: Possible hardcoded passwords found"
+          exit 1
+        fi
+        # Check for AWS keys
+        if grep -r "AKIA" . --include="*.py" --include="*.yaml"; then
+          echo "ERROR: AWS access keys found in code"
+          exit 1
+        fi
+        echo "Secret scan passed"
+
+  pulumi-preview:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Pulumi
+      uses: pulumi/actions@v5
+      with:
+        command: version
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-2
+    
+    - name: Pulumi Preview
+      uses: pulumi/actions@v5
+      with:
+        command: preview
+        stack-name: test-ci
+        work-dir: .
+      env:
+        PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+      continue-on-error: true
