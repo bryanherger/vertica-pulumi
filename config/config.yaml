@@ -1,0 +1,92 @@
+# Vertica Cluster Configuration
+# This is a PRODUCTION config file (gitignored)
+
+compute:
+  provider: aws
+  aws:
+    region: us-east-2
+    instance_type: r6i.2xlarge
+    key_name: pulumi
+    root_volume_size: 100
+    additional_volumes:
+      - size: 500
+        type: gp3
+        mount_point: /data
+    security_group_rules:
+      - protocol: tcp
+        port: 5433
+        cidr: 0.0.0.0/0
+      - protocol: tcp
+        port: 22
+        cidr: 0.0.0.0/0
+      - protocol: tcp
+        port: 5444
+        cidr: 0.0.0.0/0
+    tags:
+      Environment: development
+      Project: vertica-cluster
+
+vertica:
+  version: "25.4.0-6"
+  cluster_name: vertica-cluster
+
+  # License Configuration (Required for Vertica 26.1+)
+  license:
+    local_path: "~/Downloads/vertica_license.xml"
+
+  # RPM Configuration - Pulumi will automatically install Vertica during deployment
+  rpm:
+    local_path: "~/Downloads/vertica-25.4.0-6.RHEL8.x86_64.rpm"
+    # Alternative: download_url: "https://your-server.com/vertica-25.4.0-6.RHEL8.x86_64.rpm"
+
+  database:
+    name: analytics
+    admin_username: dbadmin
+    admin_password: "CHANGE_ME_USE_STRONG_PASSWORD"
+    # auto_create: false  # Set to true to automatically create database
+
+  nodes:
+    count: 3
+    data_path: /data/vertica
+    catalog_path: /data/catalog
+
+  network:
+    port: 5433
+    rest_api_port: 5444
+
+bootstrap:
+  # Pre-install Vertica prerequisites during cloud-init
+  # These are installed BEFORE Vertica RPM to ensure dependencies are met
+  prerequisites:
+    - dialog
+    - pcre
+    - pcre2
+    - sysstat
+    - libxcrypt-compat
+    - wget
+    # NOTE: curl intentionally omitted - Amazon Linux 2023 ships curl-minimal
+    # which conflicts with the curl package. wget is used for downloads instead.
+
+  packages:
+    - vim
+    - htop
+    - tmux
+    - net-tools
+    - psmisc
+    - lsof
+
+  pre_install:
+    - "sysctl -w vm.max_map_count=262144"
+    - "echo 'vm.max_map_count=262144' >> /etc/sysctl.conf"
+    - "echo 'vm.swappiness=1' >> /etc/sysctl.conf"
+    - "sysctl -p"
+    - "fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile"
+    - "echo '/swapfile none swap sw 0 0' >> /etc/fstab"
+    - "echo 'dbadmin soft nofile 65536' >> /etc/security/limits.conf"
+    - "echo 'dbadmin hard nofile 65536' >> /etc/security/limits.conf"
+    - "blockdev --setra 2048 /dev/nvme1n1 || true"
+    - "echo 'export TZ=UTC' >> /home/dbadmin/.bashrc"
+    - "usermod -g verticadba dbadmin || true"
+
+  post_install:
+    - "echo 'Bootstrap complete' >> /var/log/vertica-bootstrap.log"

@@ -1,0 +1,141 @@
+# Vertica Cluster Configuration
+# This is an EXAMPLE template file. Copy to config.yaml and customize.
+
+# Infrastructure Provider Configuration
+compute:
+  # Provider: aws, azure, gcp, or baremetal
+  provider: aws
+  
+  # AWS-specific settings
+  aws:
+    region: us-east-2
+    vpc_id: ""          # Leave empty to create new VPC
+    subnet_id: ""       # Leave empty to create new subnet
+    instance_type: r6i.2xlarge     # Vertica recommended: memory optimized
+    ami: ""             # Leave empty to use latest Amazon Linux 2023
+    key_name: "pulumi"        # SSH key pair name (must exist in AWS EC2)
+    root_volume_size: 100           # GB
+    additional_volumes:
+      - size: 500       # GB for data
+        type: gp3
+        mount_point: /data
+    security_group_rules:
+      - protocol: tcp
+        port: 5433      # Vertica client port
+        cidr: 0.0.0.0/0
+      - protocol: tcp
+        port: 22        # SSH
+        cidr: 0.0.0.0/0
+      - protocol: tcp
+        port: 5444      # Vertica REST API
+        cidr: 0.0.0.0/0
+    tags:
+      Environment: production
+      Project: vertica-cluster
+
+  # Bare metal / existing servers
+  baremetal:
+    hosts:
+      - hostname: vertica-node-1
+        ip: 192.168.1.101
+        ssh_user: admin
+        ssh_key_path: ~/.ssh/id_rsa
+      - hostname: vertica-node-2
+        ip: 192.168.1.102
+        ssh_user: admin
+        ssh_key_path: ~/.ssh/id_rsa
+
+# Vertica Database Configuration
+vertica:
+  version: "25.4.0-6"    # Vertica version to install
+  cluster_name: vertica-cluster
+  
+  # License Configuration (Required for Vertica 26.1+)
+  license:
+    # Path to Vertica license file (required for EE installations)
+    local_path: "/path/to/vertica_license.xml"
+    
+  # RPM Configuration - Pulumi will automatically install Vertica during deployment
+  rpm:
+    # Path to local Vertica RPM file (relative to project root or absolute path)
+    local_path: "/path/to/vertica-25.4.0-6.RHEL8.x86_64.rpm"
+    # OR specify a download URL (Pulumi will download and distribute)
+    # download_url: "https://your-server.com/vertica-25.4.0-6.RHEL8.x86_64.rpm"
+  
+  # Database configuration
+  database:
+    name: analytics
+    admin_username: dbadmin
+    admin_password: "CHANGE_ME_USE_STRONG_PASSWORD"  # Will be stored as Pulumi secret
+    # auto_create: true  # Automatically create database after installation
+    
+  # Node configuration
+  nodes:
+    count: 3              # Number of nodes (must match compute instances)
+    data_path: /data/vertica
+    catalog_path: /data/catalog
+    
+  # Network configuration
+  network:
+    port: 5433
+    rest_api_port: 5444
+    control_broadcast: true
+    
+  # Security
+  security:
+    ssl_mode: prefer
+    # tls_cert_path: /path/to/cert
+    # tls_key_path: /path/to/key
+    
+  # Resource limits
+  resources:
+    max_memory_percent: 85
+    temp_space_limit: 100GB
+    
+  # Optional: Additional configuration parameters
+  config_params:
+    MaxClientSessions: 100
+    EnableSSL: 1
+
+# Bootstrap Configuration
+bootstrap:
+  # Pre-install Vertica prerequisites during cloud-init
+  # These are installed BEFORE Vertica RPM to ensure dependencies are met
+  prerequisites:
+    - dialog
+    - pcre
+    - pcre2
+    - sysstat
+    - libxcrypt-compat
+    # NOTE: curl intentionally omitted - Amazon Linux 2023 ships curl-minimal
+    # which conflicts with the curl package. wget is used for downloads instead.
+    
+  # Additional packages to install before Vertica
+  packages:
+    - vim
+    - htop
+    - tmux
+    - wget
+    # NOTE: curl intentionally omitted from packages too - Amazon Linux 2023
+    # ships curl-minimal which conflicts. wget is used for downloads instead.
+    - net-tools
+    - psmisc
+    - lsof
+    
+  # Pre-installation system configuration scripts (run BEFORE Vertica install)
+  pre_install:
+    - "sysctl -w vm.max_map_count=262144"
+    - "echo 'vm.max_map_count=262144' >> /etc/sysctl.conf"
+    - "echo 'vm.swappiness=1' >> /etc/sysctl.conf"
+    - "sysctl -p"
+    - "fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile"
+    - "echo '/swapfile none swap sw 0 0' >> /etc/fstab"
+    - "echo 'dbadmin soft nofile 65536' >> /etc/security/limits.conf"
+    - "echo 'dbadmin hard nofile 65536' >> /etc/security/limits.conf"
+    - "blockdev --setra 2048 /dev/nvme1n1 || true"
+    - "echo 'export TZ=UTC' >> /home/dbadmin/.bashrc"
+    
+  # Post-installation scripts (run AFTER Vertica install)
+  post_install:
+    - "systemctl enable vertica-agent || true"
+    - "echo 'Vertica installation complete' > /var/log/vertica-install.log"

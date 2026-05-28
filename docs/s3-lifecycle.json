@@ -1,0 +1,30 @@
+{
+    "Rules": [
+        {
+            "ID": "vertica-incomplete-uploads",
+            "Status": "Enabled",
+            "Filter": {
+                "Prefix": ""
+            },
+            "AbortIncompleteMultipartUpload": {
+                "DaysAfterInitiation": 7
+            }
+        },
+        {
+            "ID": "vertica-old-versions",
+            "Status": "Enabled",
+            "Filter": {
+                "Prefix": ""
+            },
+            "NoncurrentVersionTransitions": [
+                {
+                    "NoncurrentDays": 30,
+                    "StorageClass": "STANDARD_IA"
+                }
+            ],
+            "NoncurrentVersionExpiration": {
+                "NoncurrentDays": 90
+            }
+        }
+    ]
+}

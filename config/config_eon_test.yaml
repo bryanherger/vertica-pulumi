@@ -1,0 +1,108 @@
+# Test Eon Mode Configuration
+
+compute:
+  provider: aws
+  aws:
+    region: us-east-2
+    key_name: pulumi
+    instance_type: r6i.2xlarge
+    root_volume_size: 100
+    additional_volumes:
+      - size: 500
+        type: gp3
+        mount_point: /data
+    security_group_rules:
+      - protocol: tcp
+        port: 5433
+        cidr: 0.0.0.0/0
+      - protocol: tcp
+        port: 22
+        cidr: 0.0.0.0/0
+      - protocol: tcp
+        port: 5444
+        cidr: 0.0.0.0/0
+      - protocol: tcp
+        port: 8443
+        cidr: 0.0.0.0/0
+      - protocol: tcp
+        port: 5554
+        cidr: 0.0.0.0/0
+    tags:
+      Environment: test
+      Project: vertica-eon-test
+
+vertica:
+  version: "25.4.0-6"
+  cluster_name: vertica-eon-test
+  mode: eon
+  
+  license:
+    local_path: "/home/bryan/Downloads/vertica_license.xml"
+    
+  rpm:
+    local_path: "/home/bryan/Downloads/vertica-25.4.0-6.RHEL8.x86_64.rpm"
+
+  database:
+    name: eon_test_db
+    admin_username: dbadmin
+    admin_password: "CHANGE_ME_USE_STRONG_PASSWORD"
+    
+  eon:
+    communal_storage_location: "s3://vertica-pulumi-bryanh/eon_test_db"
+    shard_count: 3
+    depot_path: /data/depot
+    depot_size: "80%"
+    aws_region: "us-east-2"
+    aws_enable_https: true
+    enable_s3_encryption: true
+
+  nodes:
+    count: 3
+    data_path: /data/vertica
+    catalog_path: /data/catalog
+
+  network:
+    port: 5433
+    rest_api_port: 5444
+    
+  security:
+    generate_nma_certs: true
+    cert_validity_days: 365
+    cert_country: "US"
+    cert_org: "TestOrg"
+    cert_cn: "vertica-nma-test"
+
+bootstrap:
+  prerequisites:
+    - dialog
+    - pcre
+    - pcre2
+    - sysstat
+    - libxcrypt-compat
+    
+  packages:
+    - vim
+    - htop
+    - tmux
+    - wget
+    - net-tools
+    - psmisc
+    - lsof
+    - aws-cli
+    
+  pre_install:
+    - "sysctl -w vm.max_map_count=262144"
+    - "echo 'vm.max_map_count=262144' >> /etc/sysctl.conf"
+    - "echo 'vm.swappiness=1' >> /etc/sysctl.conf"
+    - "sysctl -p"
+    - "fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile"
+    - "echo '/swapfile none swap sw 0 0' >> /etc/fstab"
+    - "echo 'dbadmin soft nofile 65536' >> /etc/security/limits.conf"
+    - "echo 'dbadmin hard nofile 65536' >> /etc/security/limits.conf"
+    - "mkdir -p /data/depot"
+    - "mkdir -p /home/dbadmin/.aws"
+    
+  post_install:
+    - "echo 'Bootstrap complete' >> /var/log/vertica-bootstrap.log"
+    - "systemctl enable vertica-nma || true"
+    - "systemctl start vertica-nma || true"

@@ -1,0 +1,182 @@
+# Vertica Eon Mode Cluster Configuration
+# This is an EXAMPLE template file for Eon Mode deployment. Copy to config_eon.yaml and customize.
+# 
+# Eon Mode uses communal storage (S3) and separates compute from storage.
+# Each node has a local depot for caching hot data.
+
+# Infrastructure Provider Configuration
+compute:
+  provider: aws
+  aws:
+    region: us-east-2
+    vpc_id: ""          # Leave empty to create new VPC
+    subnet_id: ""       # Leave empty to create new subnet
+    instance_type: r6i.2xlarge     # Vertica recommended: memory optimized
+    ami: ""             # Leave empty to use latest Amazon Linux 2023
+    key_name: "pulumi"        # SSH key pair name (must exist in AWS EC2)
+    root_volume_size: 100           # GB
+    additional_volumes:
+      - size: 500       # GB for depot
+        type: gp3
+        mount_point: /data
+    security_group_rules:
+      - protocol: tcp
+        port: 5433      # Vertica client port
+        cidr: 0.0.0.0/0
+      - protocol: tcp
+        port: 22        # SSH
+        cidr: 0.0.0.0/0
+      - protocol: tcp
+        port: 5444      # Vertica REST API
+        cidr: 0.0.0.0/0
+      - protocol: tcp
+        port: 8443      # NMA HTTPS port
+        cidr: 0.0.0.0/0
+      - protocol: tcp
+        port: 5554      # Spread
+        cidr: 0.0.0.0/0
+    tags:
+      Environment: production
+      Project: vertica-eon-cluster
+
+# Vertica Database Configuration - EON MODE
+vertica:
+  version: "25.4.0-6"
+  cluster_name: vertica-eon-cluster
+  mode: eon                    # Must be 'eon' for Eon Mode
+  
+  # License Configuration (Required for Vertica 26.1+)
+  license:
+    local_path: "/path/to/vertica_license.xml"
+    
+  # RPM Configuration
+  rpm:
+    local_path: "/path/to/vertica-25.4.0-6.RHEL8.x86_64.rpm"
+
+  # Eon Mode Database configuration
+  database:
+    name: analytics
+    admin_username: dbadmin
+    # CHANGE THIS: Use a strong password and set via VERTICA_ADMIN_PASSWORD env var
+    # Example: export VERTICA_ADMIN_PASSWORD=$(openssl rand -base64 24)
+    admin_password: "CHANGE_ME_USE_STRONG_PASSWORD"
+    
+  # Eon Mode specific settings
+  eon:
+    # Communal storage location (S3 bucket path)
+    # Format: s3://bucket-name/path
+    communal_storage_location: "s3://my-vertica-communal-storage/analytics"
+    
+    # Number of shards in the database
+    # Recommended: Equal to or greater than the number of nodes initially
+    # For 3 nodes, start with 3 shards. Can scale later.
+    shard_count: 3
+    
+    # Depot path on each node (local storage for hot data caching)
+    depot_path: /data/depot
+    
+    # Depot size - can be absolute (e.g., 200G) or percentage (e.g., 80%)
+    # Recommended: 80% of the available disk space on the depot volume
+    depot_size: "80%"
+    
+    # AWS credentials for S3 access
+    # SECURITY WARNING: Prefer IAM roles over access keys. Only use these if IAM
+    # roles/instance profiles are not available. These values are read at runtime
+    # and never committed to version control.
+    # See README_EON.md for IAM role setup instructions.
+    aws_access_key_id: ""       # Leave empty to use IAM role/instance profile
+    aws_secret_access_key: ""   # Leave empty to use IAM role/instance profile
+    
+    # AWS region for communal storage (usually same as compute region)
+    aws_region: "us-east-2"
+    
+    # S3 endpoint (optional - for custom S3-compatible storage)
+    # Leave empty for AWS S3
+    s3_endpoint: ""
+    
+    # Enable HTTPS for S3 (default: true for AWS)
+    aws_enable_https: true
+    
+    # Enable S3 server-side encryption
+    enable_s3_encryption: true
+
+  nodes:
+    count: 3
+    data_path: /data/vertica
+    catalog_path: /data/catalog
+
+  network:
+    port: 5433
+    rest_api_port: 5444
+    
+  # Security - NMA/HTTPS certificates
+  security:
+    # If true, generate self-signed RSA certificates for NMA HTTPS
+    # and deploy to all nodes during installation
+    generate_nma_certs: true
+    
+    # Certificate validity in days (default: 365)
+    cert_validity_days: 365
+    
+    # Country code for certificate (default: US)
+    cert_country: "US"
+    
+    # Organization name for certificate
+    cert_org: "MyOrganization"
+    
+    # Common name for certificate
+    cert_cn: "vertica-nma"
+    
+    # Alternative: provide existing certificate files
+    # If these are set, they take precedence over generated certs
+    cert_file: ""         # Path to existing certificate PEM file
+    key_file: ""          # Path to existing private key PEM file
+
+bootstrap:
+  # Pre-install Vertica prerequisites during cloud-init
+  prerequisites:
+    - dialog
+    - pcre
+    - pcre2
+    - sysstat
+    - libxcrypt-compat
+    # NOTE: curl intentionally omitted - Amazon Linux 2023 ships curl-minimal
+    # which conflicts with the curl package. wget is used for downloads instead.
+    
+  packages:
+    - vim
+    - htop
+    - tmux
+    - wget
+    - net-tools
+    - psmisc
+    - lsof
+    # Required for S3 connectivity (Eon mode)
+    - aws-cli
+    
+  pre_install:
+    - "sysctl -w vm.max_map_count=262144"
+    - "echo 'vm.max_map_count=262144' >> /etc/sysctl.conf"
+    - "echo 'vm.swappiness=1' >> /etc/sysctl.conf"
+    - "sysctl -p"
+    - "fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile"
+    - "echo '/swapfile none swap sw 0 0' >> /etc/fstab"
+    - "echo 'dbadmin soft nofile 65536' >> /etc/security/limits.conf"
+    - "echo 'dbadmin hard nofile 65536' >> /etc/security/limits.conf"
+    - "blockdev --setra 2048 /dev/nvme1n1 || true"
+    - "echo 'export TZ=UTC' >> /home/dbadmin/.bashrc"
+    - "usermod -g verticadba dbadmin || true"
+    # Create depot directory
+    - "mkdir -p /data/depot"
+    - "chown dbadmin:verticadba /data/depot"
+    - "chmod 755 /data/depot"
+    # Configure AWS CLI for S3 access if using access keys
+    # NOTE: If using IAM instance profile (recommended), no AWS credential files needed.
+    # If using access keys (not recommended), create ~/.aws/credentials manually.
+    # See docs/DEPLOYMENT_EON.md for security best practices.
+
+  post_install:
+    - "echo 'Bootstrap complete' >> /var/log/vertica-bootstrap.log"
+    # Ensure NMA service is enabled
+    - "systemctl enable vertica-nma || true"
+    - "systemctl start vertica-nma || true"

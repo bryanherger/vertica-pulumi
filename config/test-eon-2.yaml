@@ -1,0 +1,39 @@
+compute:
+  provider: aws
+  aws:
+    region: us-east-2
+    key_name: pulumi
+    instance_type: r6i.2xlarge
+    additional_volumes:
+    - size: 500
+      type: gp3
+      mount_point: /data
+vertica:
+  mode: eon
+  version: 25.4.0-6
+  cluster_name: vertica-eon-test-2
+  database:
+    name: eon_test_db
+    admin_username: dbadmin
+    admin_password: CHANGE_ME_USE_STRONG_PASSWORD
+  rpm:
+    local_path: /home/bryan/Downloads/vertica-25.4.0-6.RHEL8.x86_64.rpm
+  eon:
+    communal_storage_location: s3://vertica-pulumi-bryanh/eon_test_db_2
+    shard_count: 3
+    depot_path: /data/depot
+    depot_size: 80%
+    aws_region: us-east-2
+    aws_enable_https: true
+    enable_s3_encryption: true
+  nodes:
+    count: 3
+    data_path: /data/vertica
+    catalog_path: /data/catalog
+  security:
+    generate_nma_certs: true
+    cert_validity_days: 365
+    cert_country: US
+    cert_org: TestOrg
+  license:
+    local_path: /home/bryan/Downloads/vertica_license.xml
