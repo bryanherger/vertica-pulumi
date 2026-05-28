@@ -1,0 +1,69 @@
+# Pulumi
+*.pid
+.stack
+Pulumi.*.yaml
+!Pulumi.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config files with sensitive data - only track examples
+config/*.yaml
+config/*.yml
+!config/*.example.yaml
+!config/*.example.yml
+!config/vertica-cluster.yaml.example
+!config/vertica-cluster-eon.yaml.example
+
+# Temporary and log files
+*.log
+*.tmp
+/tmp/
+
+# Certificates and keys (security)
+*.pem
+*.key
+*.crt
+certs/
+
+# AWS credentials (security)
+.aws/
+credentials/
+
+# State files
+*.tfstate
+*.tfstate.*
