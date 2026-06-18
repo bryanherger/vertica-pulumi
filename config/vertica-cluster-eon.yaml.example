@@ -15,6 +15,17 @@ compute:
     ami: ""             # Leave empty to use latest Amazon Linux 2023
     key_name: "pulumi"        # SSH key pair name (must exist in AWS EC2)
     root_volume_size: 100           # GB
+
+    # S3 / communal storage authentication.
+    #  - "iam_role"  -> Pulumi creates an IAM role + instance profile and
+    #                   attaches it to every node (recommended, no keys in config).
+    #  - "access_keys" -> you must configure AWS credentials on each node manually.
+    s3_auth_mode: "iam_role"
+
+    # Optional: use an existing IAM instance profile instead of creating one.
+    # Leave empty unless you already have a profile in AWS with S3 access.
+    # iam_instance_profile: ""
+
     additional_volumes:
       - size: 500       # GB for depot
         type: gp3
@@ -91,13 +102,10 @@ vertica:
     # Recommended: 80% of the available disk space on the depot volume
     depot_size: "80%"
     
-    # AWS credentials for S3 access
-    # SECURITY WARNING: Prefer IAM roles over access keys. Only use these if IAM
-    # roles/instance profiles are not available. These values are read at runtime
-    # and never committed to version control.
-    # See README_EON.md for IAM role setup instructions.
-    aws_access_key_id: ""       # Leave empty to use IAM role/instance profile
-    aws_secret_access_key: ""   # Leave empty to use IAM role/instance profile
+    # AWS credentials for S3 access (only used when compute.aws.s3_auth_mode is
+    # "access_keys"). Prefer IAM roles; leave these empty when using IAM.
+    aws_access_key_id: ""
+    aws_secret_access_key: ""
     
     # AWS region for communal storage (usually same as compute region)
     aws_region: "us-east-2"

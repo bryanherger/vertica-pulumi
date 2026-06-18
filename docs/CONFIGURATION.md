@@ -153,6 +153,15 @@ compute:
     instance_type: r6i.4xlarge      # More CPU/memory
     key_name: production-key
     root_volume_size: 200
+
+    # S3 authentication for Eon Mode communal storage.
+    #  - "iam_role": Pulumi creates an IAM role + instance profile (recommended).
+    #  - "access_keys": You must configure AWS credentials on each node.
+    s3_auth_mode: iam_role
+
+    # Optional: attach an existing IAM instance profile instead of creating one.
+    # iam_instance_profile: my-existing-profile
+
     additional_volumes:
       - size: 1000                  # 1TB data volume
         type: io2                   # High performance
@@ -181,6 +190,30 @@ vertica:
   config_params:
     MaxClientSessions: 500
     EnableSSL: 1
+```
+
+### Eon Mode AWS
+
+See `README_EON.md` for the full walkthrough. Key settings:
+
+```yaml
+compute:
+  provider: aws
+  aws:
+    region: us-east-2
+    key_name: pulumi
+    instance_type: r6i.2xlarge
+    s3_auth_mode: iam_role       # Pulumi creates the instance profile
+
+vertica:
+  mode: eon
+  eon:
+    communal_storage_location: "s3://my-bucket/eon_test_db"
+    shard_count: 3
+    depot_path: /data/depot
+    depot_size: "80%"
+    aws_region: "us-east-2"
+    enable_s3_encryption: true
 ```
 
 ## Validation

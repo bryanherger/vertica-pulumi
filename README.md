@@ -80,91 +80,85 @@ pulumi-vertica-cluster/
 
 ## Quick Start
 
-### 1. Install Dependencies
+### Eon Mode on AWS (recommended)
 
-```bash
-cd pulumi-vertica-cluster
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
+For a complete walkthrough including Pulumi installation, S3 bucket setup, Vertica RPM/license staging, and a 3-node Eon Mode deployment, see:
 
-### 2. Configure
+**[README_EON.md](README_EON.md)**
 
-Create `config/config.yaml`:
+### Enterprise Mode (quick local test)
 
-```yaml
-vertica:
-  cluster_name: my-vertica-cluster
-  version: "24.1"
-  database:
-    name: analytics
-    admin_username: dbadmin
-    admin_password: SecurePassword123!
-    shard_count: 6
-  nodes:
-    data_path: /data/vertica
-    catalog_path: /data/catalog
-    depot_path: /data/depot
-  network:
-    port: 5433
-    rest_api_port: 5444
-  # For Eon Mode, add communal storage:
-  # communal_storage:
-  #   provider: s3
-  #   path: s3://my-bucket/vertica/communal
-  #   region: us-east-1
+1. Install dependencies:
 
-aws:
-  region: us-east-1
-  instance_type: r6i.2xlarge
-  key_name: my-ssh-key
-  tags:
-    Project: vertica-analytics
-    Environment: production
-```
+   ```bash
+   # Install Pulumi first: https://www.pulumi.com/docs/install/
+   curl -fsSL https://get.pulumi.com | sh
 
-### 3. Set Pulumi Config
+   cd pulumi-vertica-cluster
+   python3 -m venv venv
+   source venv/bin/activate
+   pip install -r requirements.txt
+   ```
 
-```bash
-pulumi config set cluster_name my-vertica-cluster
-pulumi config set node_count 3
-pulumi config set instance_type r6i.2xlarge
-pulumi config set db_name analytics
-pulumi config set --secret db_password SecurePassword123!
-```
+2. Configure:
 
-### 4. Deploy Infrastructure
+   Copy and edit `config/vertica-cluster.yaml.example`:
 
-```bash
-pulumi up
-```
+   ```bash
+   cp config/vertica-cluster.yaml.example config/config.yaml
+   ```
 
-This creates:
-- VPC with Internet Gateway
-- Public subnet with route table
-- Security group (ports 22, 5433, 5444, 5434, 4803)
-- EC2 instances with EBS volumes
+   ```yaml
+   vertica:
+     cluster_name: my-vertica-cluster
+     version: "24.1"
+     database:
+       name: analytics
+       admin_username: dbadmin
+       admin_password: SecurePassword123!
+       shard_count: 6
+     nodes:
+       data_path: /data/vertica
+       catalog_path: /data/catalog
+       depot_path: /data/depot
+     network:
+       port: 5433
+       rest_api_port: 5444
 
-### 5. Create Database
+   aws:
+     region: us-east-1
+     instance_type: r6i.2xlarge
+     key_name: my-ssh-key
+     tags:
+       Project: vertica-analytics
+       Environment: production
+   ```
 
-After infrastructure is ready, create the database:
+3. Set Pulumi config:
 
-```bash
-# Using the CLI tool
-python scripts/vertica-cli.py create-db \
-  --hosts $(pulumi stack output node_ips) \
-  --db-name analytics \
-  --wait
+   ```bash
+   pulumi stack init dev
+   pulumi config set cluster_name my-vertica-cluster
+   pulumi config set node_count 3
+   pulumi config set instance_type r6i.2xlarge
+   pulumi config set db_name analytics
+   pulumi config set --secret db_password SecurePassword123!
+   ```
 
-# Or for Eon Mode
-python scripts/vertica-cli.py create-db \
-  --hosts $(pulumi stack output node_ips) \
-  --db-name analytics \
-  --eon-mode \
-  --shard-count 6 \
-  --wait
-```
+4. Deploy:
+
+   ```bash
+   pulumi preview
+   pulumi up
+   ```
+
+5. Create the database:
+
+   ```bash
+   python scripts/install_vertica.py \
+       --config config/config.yaml \
+       --ssh-key ~/.ssh/my-ssh-key.pem
+   ```
 
 ## CLI Usage
 

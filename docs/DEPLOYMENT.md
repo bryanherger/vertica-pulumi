@@ -28,15 +28,20 @@
 
 ## Configuration
 
-1. Copy sample configuration:
+1. Copy the sample configuration that matches your deployment mode:
    ```bash
-   cp config/sample-config.yaml config/my-cluster.yaml
+   # Eon Mode on AWS (recommended for cloud deployments)
+   cp config/vertica-cluster-eon.yaml.example config/config_eon.yaml
+
+   # Enterprise Mode on AWS
+   cp config/vertica-cluster.yaml.example config/config.yaml
    ```
 
-2. Edit configuration with your settings:
+2. Edit the copied file with your settings:
    - AWS region and instance types
    - Vertica version and database name
-   - SSH key name
+   - SSH key pair name
+   - S3 bucket (for Eon Mode)
    - Network settings
 
 3. Set configuration file:

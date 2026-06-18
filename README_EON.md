@@ -1,262 +1,122 @@
 # Vertica Eon Mode Deployment - Quick Start
 
-Deploy Vertica in **Eon Mode** on AWS using vcluster with automated certificate management.
+Deploy Vertica in **Eon Mode** on AWS using Pulumi and `vcluster`. Eon Mode separates compute from storage: all data lives in S3 communal storage while each node keeps a local depot cache.
 
-## What's Eon Mode?
+## What this deploys
 
-Eon Mode separates compute from storage:
-- **Communal Storage**: S3 bucket holds all data (durable, shared)
-- **Depot**: Local SSD cache per node for hot data (fast queries)
-- **Shards**: Data divided for parallel processing
-- **Scale compute independently** from storage
+```
+┌─────────────────────────────────────────┐
+│           S3 Communal Storage          │
+│     (All data, shared across nodes)      │
+└─────────────────────────────────────────┘
+                   │
+    ┌──────────────┼──────────────┐
+    │              │              │
+┌───▼───┐    ┌───▼───┐    ┌───▼───┐
+│ Node 1 │    │ Node 2 │    │ Node 3 │
+│+ Depot │    │+ Depot │    │+ Depot │
+└────────┘    └────────┘    └────────┘
+```
 
 ## Prerequisites
 
-- **AWS Account** with EC2 and S3 access
-- **Vertica RPM** file (`vertica-25.4.0-6.RHEL8.x86_64.rpm` or similar)
-- **Vertica License** file (required for 26.1+)
-- **S3 Bucket** created for communal storage (see S3 Setup below)
-- **SSH Key Pair** in AWS EC2 (e.g., `pulumi`)
-- **Python 3.6+** with PyYAML: `pip install pyyaml`
+- AWS account with permission to create VPC, EC2, EBS, IAM, and S3 resources
+- Vertica RPM file (e.g. `vertica-25.4.0-6.RHEL8.x86_64.rpm`)
+- Valid Vertica license XML file
+- SSH key pair registered in AWS EC2
+- Pulumi installed locally (see full guide for install steps)
 
-### S3 Bucket Setup
-
-Create a dedicated S3 bucket for Vertica communal storage:
+## TL;DR - deploy a 3-node Eon cluster
 
 ```bash
-# Create bucket in the same region as your cluster
+# 1. Install Pulumi and clone the repo
+curl -fsSL https://get.pulumi.com | sh
+git clone https://github.com/bryanherger/vertica-pulumi.git
+cd vertica-pulumi
+
+# 2. Install Python dependencies
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# 3. Stage Vertica RPM and license in the project directory
+cp /path/to/vertica-25.4.0-6.RHEL8.x86_64.rpm ./vertica.rpm
+cp /path/to/vertica_license.xml ./vertica_license.xml
+
+# 4. Create an S3 bucket for communal storage (replace with a unique name)
 aws s3api create-bucket \
-    --bucket my-vertica-communal-storage \
+    --bucket my-vertica-eon-bucket \
     --region us-east-2 \
     --create-bucket-configuration LocationConstraint=us-east-2
 
-# Enable versioning (recommended for production)
-aws s3api put-bucket-versioning \
-    --bucket my-vertica-communal-storage \
-    --versioning-configuration Status=Enabled
+# 5. Configure the cluster
+cp config/vertica-cluster-eon.yaml.example config/config_eon.yaml
+# Edit config_eon.yaml:
+#   - compute.aws.key_name
+#   - compute.aws.region
+#   - vertica.eon.communal_storage_location (use your bucket name)
+#   - vertica.database.admin_password
+#   - vertica.rpm.local_path and vertica.license.local_path
 
-# Configure lifecycle rules for old versions
-aws s3api put-bucket-lifecycle-configuration \
-    --bucket my-vertica-communal-storage \
-    --lifecycle-configuration file://docs/s3-lifecycle.json
-```
-
-### AWS Authentication (Choose One)
-
-#### Option A: IAM Instance Profile (Recommended)
-
-Create an IAM role with S3 access and attach it to the EC2 instances. This is the most secure approach as credentials are automatically rotated and never stored on disk.
-
-**Required IAM Permissions:**
-```json
-{
-    "Version": "2012-10-17",
-    "Statement": [
-        {
-            "Effect": "Allow",
-            "Action": [
-                "s3:ListBucket",
-                "s3:GetBucketLocation",
-                "s3:PutObject",
-                "s3:GetObject",
-                "s3:DeleteObject",
-                "s3:AbortMultipartUpload",
-                "s3:ListMultipartUploadParts"
-            ],
-            "Resource": [
-                "arn:aws:s3:::my-vertica-communal-storage",
-                "arn:aws:s3:::my-vertica-communal-storage/*"
-            ]
-        }
-    ]
-}
-```
-
-**Why use IAM roles?**
-- No credentials stored in configuration files
-- Automatic credential rotation
-- No risk of accidental credential exposure in logs or git
-
-#### Option B: AWS CLI Credentials (Use Only If IAM Role Not Available)
-
-If you cannot use IAM instance profiles, configure AWS CLI credentials on each node:
-
-```bash
-# On each EC2 instance after deployment
-sudo -u dbadmin aws configure
-# Enter your AWS Access Key ID and Secret Access Key
-```
-
-**Security Warning:** If you must use access keys, set them via environment variables or AWS CLI configuration files. Never commit credentials to version control.
-
-## Quick Deploy (5 Steps)
-
-### 1. Generate Configuration
-
-Interactive mode (recommended first time):
-
-```bash
-python scripts/generate_eon_config.py --interactive --output config/config_eon.yaml
-```
-
-Or non-interactive:
-
-```bash
-python scripts/generate_eon_config.py \
-    --output config/config_eon.yaml \
-    --region us-east-2 \
-    --key-name pulumi \
-    --rpm-path ~/Downloads/vertica-25.4.0-6.RHEL8.x86_64.rpm \
-    --license-path ~/Downloads/vertica_license.xml \
-    --communal-storage s3://my-vertica-bucket/analytics \
-    --shard-count 3 \
-    --admin-password '$(openssl rand -base64 24)'
-```
-
-### 2. Deploy AWS Infrastructure
-
-```bash
-pulumi stack init eon-cluster
-pulumi config set aws:region us-east-2
+# 6. Deploy the AWS infrastructure
+export VERTICA_CONFIG=config/config_eon.yaml
+pulumi stack init eon-test
 pulumi up
-```
 
-### 3. Install Vertica (Eon Mode)
-
-```bash
-python scripts/install_vertica_eon.py \
+# 7. Install Vertica and create the database
+python3 scripts/install_vertica_eon.py \
     --config config/config_eon.yaml \
-    --rpm-path ~/Downloads/vertica-25.4.0-6.RHEL8.x86_64.rpm \
-    --license-path ~/Downloads/vertica_license.xml
+    --ssh-key ~/.ssh/pulumi.pem
+
+# 8. Verify
+PRIMARY_IP=$(pulumi stack output instance_ips | head -1)
+ssh -i ~/.ssh/pulumi.pem ec2-user@"$PRIMARY_IP" \
+    "/opt/vertica/bin/vsql -U dbadmin -d eon_test_db -c 'SELECT node_name, node_state FROM nodes;'"
 ```
 
-This single command:
-1. ✅ Uploads RPM + license to all nodes
-2. ✅ Installs Vertica on all nodes
-3. ✅ Generates RSA key pairs + certificates
-4. ✅ Deploys certificates to all nodes
-5. ✅ Starts NMA + HTTPS services
-6. ✅ Creates Eon Mode database with vcluster
+## IAM instance profile (recommended)
 
-### 4. Verify Database
+The Pulumi program can create and attach an IAM instance profile automatically. In `config_eon.yaml`:
 
-```bash
-# Get primary node IP
-pulumi stack output instance_ips
-
-# Connect to database (use your configured password)
-export VERTICA_PASSWORD="$(pulumi stack output admin_password)"
-vsql -U dbadmin -d analytics -h <primary-ip> -w "$VERTICA_PASSWORD"
-
-# Run verification queries
-SELECT version();
-SELECT * FROM nodes;
-SELECT * FROM communal_storage;
-
-# ⚠️ IMPORTANT: After inserting data, sync to S3 to ensure persistence
-SELECT sync_catalog();
+```yaml
+compute:
+  aws:
+    s3_auth_mode: iam_role   # Pulumi creates the role + instance profile
 ```
 
-### ⚠️ Data Persistence Warning
+If you prefer to use a pre-existing profile:
 
-**Always call `SELECT sync_catalog();` after inserting data!**
+```yaml
+compute:
+  aws:
+    s3_auth_mode: iam_role
+    iam_instance_profile: my-existing-profile-name
+```
 
-Eon Mode writes to local depot first, then flushes to S3 asynchronously. If you destroy the cluster before data is synced, it will be lost. The installation script automatically syncs after database creation, but manual operations require explicit sync.
+If IAM instance profiles are not available in your environment, set `s3_auth_mode: access_keys` and configure AWS credentials on each node manually. See `docs/DEPLOYMENT_EON.md` for details.
 
-### 5. (Optional) Destroy When Done
+## Full guide
+
+For detailed step-by-step instructions, including Pulumi installation on Linux/macOS/Windows, AWS credential setup, all configuration options, verification commands, and troubleshooting, see:
+
+**[docs/DEPLOYMENT_EON.md](docs/DEPLOYMENT_EON.md)**
+
+## Important: data persistence
+
+Eon Mode writes to the local depot first and flushes to S3 asynchronously. Always call `SELECT sync_catalog();` before destroying the cluster to make sure all data is persisted in S3.
+
+## Cleanup
 
 ```bash
 pulumi destroy
-pulumi stack rm eon-cluster
+pulumi stack rm eon-test
+# The S3 bucket is not managed by Pulumi; delete it separately if desired.
+aws s3 rb s3://my-vertica-eon-bucket --force
 ```
 
-## Key Files
+## Other resources
 
-| File | Purpose |
-|------|---------|
-| `config/vertica-cluster-eon.yaml.example` | Example Eon Mode config with all options documented |
-| `config/config_eon.yaml` | Your generated configuration |
-| `scripts/generate_eon_config.py` | Interactive config generator |
-| `scripts/install_vertica_eon.py` | Full automated installation |
-| `scripts/generate_nma_certs.py` | Certificate generation + deployment |
-| `docs/DEPLOYMENT_EON.md` | Detailed deployment guide |
-
-## Eon Mode Configuration Highlights
-
-### Required Settings
-
-```yaml
-vertica:
-  mode: eon
-  eon:
-    communal_storage_location: "s3://bucket-name/db-path"
-    shard_count: 3           # Match or exceed node count
-    depot_path: /data/depot  # Local cache directory
-    depot_size: "80%"        # Or "200G" for absolute size
-```
-
-### Certificate Management
-
-Auto-generated (default):
-```yaml
-vertica:
-  security:
-    generate_nma_certs: true
-    cert_validity_days: 365
-```
-
-Or provide existing certificates:
-```yaml
-vertica:
-  security:
-    generate_nma_certs: false
-    cert_file: "/path/to/cert.pem"
-    key_file: "/path/to/key.pem"
-```
-
-### S3 Authentication
-
-**Recommended**: Use EC2 instance profile (IAM role) - no credentials in config:
-```yaml
-vertica:
-  eon:
-    aws_access_key_id: ""      # Leave empty for IAM role
-    aws_secret_access_key: ""  # Leave empty for IAM role
-```
-
-Or explicit credentials:
-```yaml
-vertica:
-  eon:
-    aws_access_key_id: "AKIA..."
-    aws_secret_access_key: "secret..."
-```
-
-## Troubleshooting
-
-| Issue | Solution |
-|-------|----------|
-| NMA won't start | Check cert files in `/opt/vertica/config/share/`, restart with `systemctl restart vertica-nma` |
-| S3 access denied | Verify IAM role or credentials, test with `aws s3 ls s3://bucket/` |
-| Database creation fails | Ensure communal storage path is empty, check NMA health with `systemctl status vertica-nma` |
-| SCP upload fails | Verify SSH key path, ensure port 22 is open in security group |
-
-## Manual Certificate Deployment
-
-If you need to redeploy certificates separately:
-
-```bash
-python scripts/generate_nma_certs.py \
-    --hosts 10.0.1.10,10.0.1.11,10.0.1.12 \
-    --ssh-key ~/.ssh/pulumi.pem \
-    --output-dir ./certs \
-    --country US \
-    --organization MyOrg \
-    --validity-days 365
-```
-
-## Additional Resources
-
-- [Full Deployment Guide](docs/DEPLOYMENT_EON.md)
 - [Architecture Overview](docs/ARCHITECTURE.md)
+- [Configuration Reference](docs/CONFIGURATION.md)
+- [Operations Guide](docs/OPERATIONS.md)
 - [Vertica Eon Mode Docs](https://docs.vertica.com/26.1.x/en/eon/)
