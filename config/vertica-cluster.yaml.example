@@ -29,6 +29,23 @@ compute:
       - protocol: tcp
         port: 5444      # Vertica REST API
         cidr: 0.0.0.0/0
+
+    # S3 / communal storage authentication for Vertica Eon Mode.
+    # Use "iam_role" to have Pulumi create and attach an IAM instance profile
+    # with least-privilege S3 access (recommended). Use "access_keys" if you will
+    # configure AWS credentials manually on the nodes.
+    s3_auth_mode: iam_role  # Options: iam_role | access_keys
+
+    # Optional: name of an existing IAM instance profile to attach to each node.
+    # If omitted and s3_auth_mode=iam_role, Pulumi creates one automatically.
+    # iam_instance_profile: ""
+
+    # For access_keys mode, set keys via Pulumi secrets instead of this file:
+    #   pulumi config set aws_access_key_id <key>
+    #   pulumi config set --secret aws_secret_access_key <secret>
+    # aws_access_key_id: ""
+    # aws_secret_access_key: ""  # Do NOT put real secrets in plain YAML.
+
     tags:
       Environment: production
       Project: vertica-cluster

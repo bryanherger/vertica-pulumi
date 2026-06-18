@@ -1,284 +1,257 @@
 """
-Base compute abstraction - defines the interface that all compute providers must implement.
+Base compute abstractions for Vertica cluster deployment.
 
-This allows the Vertica provisioning layer to work with any infrastructure
-without knowing the details of the underlying cloud provider.
+Provides common interfaces for instance/cluster lifecycle that can be
+implemented by AWS, Azure, GCP, or bare-metal providers.
 """
 
+from dataclasses import dataclass, field
+from typing import Dict, Any, List, Optional
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import List, Optional, Dict, Any
 
 
 @dataclass
 class ComputeInstance:
-    """Represents a single compute instance (VM, bare metal server, etc.)"""
-    id: str                          # Provider-specific ID
-    name: str                        # Human-readable name
-    public_ip: Optional[str]         # Public IP address (if applicable)
-    private_ip: str                  # Private IP address
-    hostname: str                    # DNS hostname
-    ssh_user: str                    # SSH username
-    ssh_key_path: Optional[str] = None  # Path to SSH private key
-    ssh_port: int = 22               # SSH port
-    status: str = "unknown"           # running, stopped, etc.
-    tags: Dict[str, str] = None     # Metadata tags
-    provider_specific: Dict[str, Any] = None  # Provider-specific data
+    """Represents a single compute instance."""
     
-    def __post_init__(self):
-        if self.tags is None:
-            self.tags = {}
-        if self.provider_specific is None:
-            self.provider_specific = {}
+    instance_id: str
+    name: str
+    instance_type: str
+    private_ip: str
+    public_ip: Optional[str] = None
+    hostname: str = ""
+    status: str = "unknown"
+    region: str = ""
+    zone: str = ""
+    tags: Dict[str, str] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    
+    @property
+    def is_primary(self) -> bool:
+        """Check if this is the primary/coordinator node."""
+        return self.tags.get("role", "") == "primary"
+    
+    def __str__(self) -> str:
+        return f"ComputeInstance({self.name}, {self.instance_type}, {self.private_ip})"
 
 
 @dataclass
 class ComputeCluster:
-    """Represents a cluster of compute instances"""
+    """Represents a cluster of compute instances."""
+    
     name: str
     instances: List[ComputeInstance]
-    provider: str                     # aws, azure, gcp, baremetal
-    vpc_id: Optional[str] = None     # Network identifier
-    subnet_id: Optional[str] = None # Subnet identifier
-    tags: Dict[str, str] = None
-    
-    def __post_init__(self):
-        if self.tags is None:
-            self.tags = {}
+    provider: str = "unknown"
+    vpc_id: Optional[str] = None
+    subnet_id: Optional[str] = None
+    security_group_id: Optional[str] = None
+    key_pair_name: Optional[str] = None
     
     @property
     def instance_count(self) -> int:
+        """Get number of instances in cluster."""
         return len(self.instances)
     
     @property
     def primary_instance(self) -> Optional[ComputeInstance]:
-        """Returns the first instance, typically the primary/coordinator"""
+        """Get primary/coordinator instance."""
+        for instance in self.instances:
+            if instance.is_primary:
+                return instance
+        # Fallback to first instance
         return self.instances[0] if self.instances else None
     
-    def get_instance_by_name(self, name: str) -> Optional[ComputeInstance]:
-        """Find an instance by its name"""
+    @property
+    def all_ips(self) -> List[str]:
+        """Get all private IPs."""
+        return [i.private_ip for i in self.instances]
+    
+    def get_instance_by_ip(self, ip: str) -> Optional[ComputeInstance]:
+        """Find instance by IP address."""
         for instance in self.instances:
-            if instance.name == name:
+            if instance.private_ip == ip or instance.public_ip == ip:
                 return instance
         return None
+    
+    def get_instance_by_id(self, instance_id: str) -> Optional[ComputeInstance]:
+        """Find instance by ID."""
+        for instance in self.instances:
+            if instance.instance_id == instance_id:
+                return instance
+        return None
+    
+    def __str__(self) -> str:
+        return f"ComputeCluster({self.name}, {self.instance_count} nodes, provider={self.provider})"
 
 
 class ComputeProvider(ABC):
-    """
-    Abstract base class for compute providers.
-    
-    All cloud provider implementations must inherit from this class
-    and implement all abstract methods.
-    """
-    
-    def __init__(self, config: Dict[str, Any]):
-        """
-        Initialize the provider with configuration.
-        
-        Args:
-            config: Provider-specific configuration from the user config file
-        """
-        self.config = config
-        self.provider_name = "base"
+    """Abstract base class for compute providers."""
     
     @abstractmethod
-    def create_cluster(self, name: str, node_count: int, 
+    def create_cluster(self, cluster_name: str, node_count: int,
+                      instance_type: Optional[str] = None,
+                      region: Optional[str] = None,
                       **kwargs) -> ComputeCluster:
         """
-        Create a new cluster of compute instances.
+        Create a new cluster with the specified number of nodes.
         
         Args:
-            name: Cluster name
-            node_count: Number of instances to create
-            **kwargs: Provider-specific options
+            cluster_name: Name for the cluster.
+            node_count: Number of nodes to create.
+            instance_type: Instance type/size.
+            region: Cloud region.
+            **kwargs: Additional provider-specific options.
             
         Returns:
-            ComputeCluster object representing the created cluster
+            ComputeCluster with created instances.
         """
         pass
     
     @abstractmethod
-    def import_cluster(self, instance_ids: List[str], 
-                      **kwargs) -> ComputeCluster:
+    def destroy_cluster(self, cluster: ComputeCluster) -> None:
         """
-        Import existing compute resources into management.
+        Destroy all instances in a cluster.
         
         Args:
-            instance_ids: List of provider-specific instance IDs or IP addresses
-            **kwargs: Provider-specific options
-            
-        Returns:
-            ComputeCluster object representing the imported cluster
+            cluster: ComputeCluster to destroy.
         """
         pass
     
     @abstractmethod
-    def get_instance(self, instance_id: str) -> Optional[ComputeInstance]:
+    def scale_up(self, cluster: ComputeCluster, additional_nodes: int,
+                instance_type: Optional[str] = None) -> List[ComputeInstance]:
         """
-        Get details of a specific instance.
+        Add nodes to an existing cluster.
         
         Args:
-            instance_id: Provider-specific instance identifier
+            cluster: Existing cluster.
+            additional_nodes: Number of nodes to add.
+            instance_type: Instance type for new nodes.
             
         Returns:
-            ComputeInstance if found, None otherwise
+            List of new ComputeInstances.
+        """
+        pass
+    
+    @abstractmethod
+    def scale_down(self, cluster: ComputeCluster, node_ips: List[str]) -> None:
+        """
+        Remove nodes from an existing cluster.
+        
+        Args:
+            cluster: Existing cluster.
+            node_ips: IPs of nodes to remove.
+        """
+        pass
+    
+    @abstractmethod
+    def get_instance_status(self, instance_id: str) -> str:
+        """
+        Get status of a single instance.
+        
+        Args:
+            instance_id: Instance identifier.
+            
+        Returns:
+            Status string.
+        """
+        pass
+    
+    @abstractmethod
+    def start_instance(self, instance_id: str) -> bool:
+        """
+        Start a stopped instance.
+        
+        Args:
+            instance_id: Instance to start.
+            
+        Returns:
+            True if started successfully.
+        """
+        pass
+    
+    @abstractmethod
+    def stop_instance(self, instance_id: str) -> bool:
+        """
+        Stop a running instance.
+        
+        Args:
+            instance_id: Instance to stop.
+            
+        Returns:
+            True if stopped successfully.
         """
         pass
     
     @abstractmethod
     def terminate_instance(self, instance_id: str) -> bool:
         """
-        Terminate/delete a specific instance.
+        Terminate (delete) an instance.
         
         Args:
-            instance_id: Provider-specific instance identifier
+            instance_id: Instance to terminate.
             
         Returns:
-            True if successful, False otherwise
+            True if terminated successfully.
         """
         pass
     
     @abstractmethod
-    def resize_cluster(self, cluster: ComputeCluster, 
-                      new_node_count: int) -> ComputeCluster:
+    def import_cluster(self, hosts: List[str], name: str = "vertica-cluster",
+                      **kwargs) -> ComputeCluster:
         """
-        Scale the cluster up or down.
+        Import an existing cluster by host IPs.
         
         Args:
-            cluster: Existing cluster to resize
-            new_node_count: Desired number of nodes
+            hosts: List of host IPs/names.
+            name: Cluster name.
+            **kwargs: Additional options.
             
         Returns:
-            Updated ComputeCluster
+            ComputeCluster with imported instances.
         """
         pass
     
     @abstractmethod
-    def get_ssh_config(self, instance: ComputeInstance) -> Dict[str, Any]:
+    def get_cluster_info(self, cluster_name: str) -> Optional[ComputeCluster]:
         """
-        Get SSH connection configuration for an instance.
+        Get information about an existing cluster.
         
         Args:
-            instance: ComputeInstance to connect to
+            cluster_name: Cluster name.
             
         Returns:
-            Dictionary with host, port, user, key_path, etc.
+            ComputeCluster or None if not found.
         """
         pass
+
+
+class ClusterBuilder:
+    """Helper for building ComputeCluster objects."""
     
-    def wait_for_instance(self, instance: ComputeInstance, 
-                         timeout: int = 300) -> bool:
-        """
-        Wait for an instance to become accessible via SSH.
-        
-        Args:
-            instance: ComputeInstance to wait for
-            timeout: Maximum wait time in seconds
-            
-        Returns:
-            True if instance is ready, False if timeout
-        """
-        import time
-        import socket
-        
-        ssh_config = self.get_ssh_config(instance)
-        host = ssh_config['host']
-        port = ssh_config['port']
-        
-        print(f"Waiting for {instance.name} ({host}:{port}) to be accessible...")
-        
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            try:
-                sock = socket.create_connection((host, port), timeout=5)
-                sock.close()
-                print(f"{instance.name} is accessible!")
-                return True
-            except (socket.timeout, ConnectionRefusedError, OSError):
-                time.sleep(5)
-        
-        print(f"Timeout waiting for {instance.name}")
-        return False
+    @staticmethod
+    def from_instances(instances: List[ComputeInstance],
+                      name: str = "vertica-cluster",
+                      provider: str = "unknown") -> ComputeCluster:
+        """Build a ComputeCluster from a list of instances."""
+        return ComputeCluster(
+            name=name,
+            instances=instances,
+            provider=provider,
+        )
     
-    def execute_on_instance(self, instance: ComputeInstance, 
-                           command: str, timeout: int = 300) -> tuple:
-        """
-        Execute a command on an instance via SSH.
-        
-        Args:
-            instance: ComputeInstance to execute on
-            command: Shell command to execute
-            timeout: Command timeout in seconds
-            
-        Returns:
-            Tuple of (stdout, stderr, exit_code)
-        """
-        import paramiko
-        
-        ssh_config = self.get_ssh_config(instance)
-        
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        
-        try:
-            pkey = None
-            if ssh_config.get('key_path'):
-                pkey = paramiko.RSAKey.from_private_key_file(ssh_config['key_path'])
-            
-            client.connect(
-                hostname=ssh_config['host'],
-                port=ssh_config['port'],
-                username=ssh_config['user'],
-                pkey=pkey,
-                password=ssh_config.get('password'),
-                timeout=30
-            )
-            
-            stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
-            exit_code = stdout.channel.recv_exit_status()
-            
-            return stdout.read().decode(), stderr.read().decode(), exit_code
-            
-        finally:
-            client.close()
-    
-    def upload_to_instance(self, instance: ComputeInstance,
-                        local_path: str, remote_path: str) -> bool:
-        """
-        Upload a file to an instance via SFTP.
-        
-        Args:
-            instance: ComputeInstance to upload to
-            local_path: Local file path
-            remote_path: Remote destination path
-            
-        Returns:
-            True if successful
-        """
-        import paramiko
-        
-        ssh_config = self.get_ssh_config(instance)
-        
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        
-        try:
-            pkey = None
-            if ssh_config.get('key_path'):
-                pkey = paramiko.RSAKey.from_private_key_file(ssh_config['key_path'])
-            
-            client.connect(
-                hostname=ssh_config['host'],
-                port=ssh_config['port'],
-                username=ssh_config['user'],
-                pkey=pkey,
-                timeout=30
-            )
-            
-            sftp = client.open_sftp()
-            sftp.put(local_path, remote_path)
-            sftp.close()
-            return True
-            
-        finally:
-            client.close()
+    @staticmethod
+    def from_ips(ips: List[str], name: str = "vertica-cluster",
+                provider: str = "unknown") -> ComputeCluster:
+        """Build a ComputeCluster from IP addresses."""
+        instances = []
+        for i, ip in enumerate(ips):
+            instances.append(ComputeInstance(
+                instance_id=f"imported-{i}",
+                name=f"node-{i}",
+                instance_type="unknown",
+                private_ip=ip,
+                hostname=f"node-{i}",
+                status="unknown",
+            ))
+        return ComputeCluster(name=name, instances=instances, provider=provider)

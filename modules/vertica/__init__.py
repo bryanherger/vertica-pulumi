@@ -1,18 +1,17 @@
 """
-Vertica database provisioning and management module.
+Vertica cluster management modules.
 
-Provides installation, configuration, and administration of Vertica
-database clusters using vcluster CLI and REST API.
+Provides vcluster CLI wrapper, REST API client, configuration helpers,
+and installation routines.
 """
 
-from .vcluster import VClusterManager
-from .install import VerticaInstaller
-from .configure import VerticaConfigurator
+from .vcluster import VClusterManager, DatabaseState, NodeState, VClusterCommandError
 from .rest_api import VerticaRestApi
 
 __all__ = [
-    'VClusterManager',
-    'VerticaInstaller', 
-    'VerticaConfigurator',
-    'VerticaRestApi',
+    "VClusterManager",
+    "DatabaseState",
+    "NodeState",
+    "VClusterCommandError",
+    "VerticaRestApi",
 ]

@@ -1,49 +1,89 @@
-# Vertica Cluster Infrastructure
+# Pulumi Vertica Cluster
 
-A cloud-agnostic Infrastructure-as-Code (IaC) module for deploying and managing Vertica database clusters on AWS.
+Complete lifecycle management for Vertica clusters using Pulumi and the vcluster CLI.
 
 ## Overview
 
-This project provides Pulumi-based infrastructure deployment for Vertica database clusters with support for both **Enterprise Edition (EE)** and **Eon Mode** deployments.
+This project provides:
 
-### Modes
+- **Infrastructure as Code**: Provision AWS EC2 instances, VPCs, security groups using Pulumi
+- **Database Lifecycle**: Create, revive, start, stop, and drop Vertica databases via vcluster CLI
+- **Node Management**: Add, remove, restart individual nodes
+- **Subcluster Management**: Add, remove, rename subclusters for workload isolation
+- **Status Monitoring**: Check database and node status
+- **Cost Management**: Stop/terminate instances when not needed
 
-| Mode | Use Case | Storage |
-|------|----------|---------|
-| **Enterprise (EE)** | Traditional on-prem style | Local EBS volumes |
-| **Eon** | Cloud-optimized, separate compute/storage | S3 communal storage + local depot cache |
+## Supported vcluster CLI Operations
 
-## Prerequisites
+### Database Lifecycle
+- `create_db` - Create a new database (Enterprise or Eon Mode)
+- `revive_db` - Revive an Eon Mode database from communal storage
+- `start_db` - Start a stopped database
+- `stop_db` - Stop a running database
+- `drop_db` - Drop (delete) a database
 
-Before starting, ensure you have:
+### Node Management
+- `add_node` - Add a new node to the database
+- `remove_node` - Remove a node from the database
+- `restart_node` - Restart a single node
+- `stop_node` - Stop a single node
+- `start_node` - Start a single node
 
-1. **Pulumi CLI** installed and in your PATH (`export PATH="$HOME/.pulumi/bin:$PATH"`)
-2. **Python 3** with pip and virtualenv
-3. **AWS CLI** or IAM user credentials with the required permissions
-4. **SSH key pair** created in AWS EC2 (e.g., `pulumi`)
-5. **Vertica Enterprise Edition RPM** (e.g., `vertica-25.4.0-6.RHEL8.x86_64.rpm`)
-6. **Vertica License** - Required for Vertica 26.1+ (file ending in `.xml`)
+### Subcluster Management
+- `add_subcluster` - Add a new subcluster
+- `remove_subcluster` - Remove a subcluster
+- `stop_subcluster` - Stop all nodes in a subcluster
+- `start_subcluster` - Start all nodes in a subcluster
+- `rename_subcluster` - Rename a subcluster
 
-### Required AWS IAM Permissions
+### Status & Information
+- `list_all_db` - List all databases
+- `db_status` - Get database status
+- `node_status` - Get node status
+- `show_cluster` - Show cluster configuration
+- `list_node` - List all nodes
 
-Your AWS user or role needs EC2 permissions. See `README_EE.md` for the complete IAM policy.
+### Maintenance
+- `re_ip` - Reconfigure IP addresses
+- `revoke` - Revoke node trust
+- `manage_config` / `show_config` - Configuration management
+- `set_config_parameter` - Set configuration parameters
 
-If you lack `ec2:DescribeAvailabilityZones` or `ec2:DescribeImages` permissions, the deployment will use fallback values (hardcoded AMI, default AZ). You can also specify an explicit AMI in `config.yaml`.
+## Architecture
+
+```
+pulumi-vertica-cluster/
+├── __main__.py                          # Main Pulumi program
+├── Pulumi.yaml                          # Pulumi project config
+├── requirements.txt                     # Python dependencies
+├── config/
+│   └── config.yaml                      # Vertica cluster configuration
+├── modules/
+│   ├── __init__.py
+│   ├── cluster_management.py            # Lifecycle manager (create/destroy/scale)
+│   ├── compute/
+│   │   ├── __init__.py
+│   │   ├── base.py                      # Abstract compute provider interface
+│   │   └── aws.py                       # AWS EC2 implementation
+│   └── vertica/
+│       ├── __init__.py
+│       ├── vcluster.py                  # Full vcluster CLI wrapper
+│       ├── rest_api.py                  # Vertica REST API client
+│       ├── install.py                   # Installation helpers
+│       ├── configure.py                 # Configuration generation
+│       └── pulumi_vertica_resources.py  # Pulumi dynamic resources
+├── scripts/
+│   └── vertica-cli.py                   # CLI tool for operations
+└── tests/
+    └── test_compute.py                  # Unit tests
+```
 
 ## Quick Start
 
-### 1. Set Up Environment
+### 1. Install Dependencies
 
 ```bash
-# Set AWS credentials (or use ~/.aws/credentials)
-export AWS_ACCESS_KEY_ID="your-key"
-export AWS_SECRET_ACCESS_KEY="your-secret"
-export AWS_DEFAULT_REGION="us-east-2"
-
-# Ensure Pulumi is in PATH
-export PATH="$HOME/.pulumi/bin:$PATH"
-
-# Create and activate virtual environment
+cd pulumi-vertica-cluster
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -51,164 +91,319 @@ pip install -r requirements.txt
 
 ### 2. Configure
 
-```bash
-cp config/vertica-cluster.yaml.example config/config.yaml
+Create `config/config.yaml`:
+
+```yaml
+vertica:
+  cluster_name: my-vertica-cluster
+  version: "24.1"
+  database:
+    name: analytics
+    admin_username: dbadmin
+    admin_password: SecurePassword123!
+    shard_count: 6
+  nodes:
+    data_path: /data/vertica
+    catalog_path: /data/catalog
+    depot_path: /data/depot
+  network:
+    port: 5433
+    rest_api_port: 5444
+  # For Eon Mode, add communal storage:
+  # communal_storage:
+  #   provider: s3
+  #   path: s3://my-bucket/vertica/communal
+  #   region: us-east-1
+
+aws:
+  region: us-east-1
+  instance_type: r6i.2xlarge
+  key_name: my-ssh-key
+  tags:
+    Project: vertica-analytics
+    Environment: production
 ```
 
-Edit `config/config.yaml` with your settings:
-- `compute.aws.region` - Your AWS region
-- `compute.aws.key_name` - Your EC2 key pair name (private key at `~/.ssh/{name}.pem`)
-- `vertica.rpm.local_path` - Path to your Vertica RPM file
-- `vertica.license.local_path` - Path to your Vertica license XML file
-- `vertica.database.admin_password` - **Change this to a strong password!**
-
-### 3. Deploy
+### 3. Set Pulumi Config
 
 ```bash
-pulumi stack init my-cluster
+pulumi config set cluster_name my-vertica-cluster
+pulumi config set node_count 3
+pulumi config set instance_type r6i.2xlarge
+pulumi config set db_name analytics
+pulumi config set --secret db_password SecurePassword123!
+```
+
+### 4. Deploy Infrastructure
+
+```bash
 pulumi up
 ```
 
-The deployment will:
-1. Create VPC, subnet, security group, and EC2 instances
-2. Install prerequisites during cloud-init (dialog, pcre, sysstat, etc.)
-3. Upload RPM and license files to instances (with retry logic)
-4. Install Vertica RPM
-5. Run `install_vertica -Y -L <license>` to accept EULA and configure
+This creates:
+- VPC with Internet Gateway
+- Public subnet with route table
+- Security group (ports 22, 5433, 5444, 5434, 4803)
+- EC2 instances with EBS volumes
 
-### 4. Verify
+### 5. Create Database
 
-```bash
-# Check outputs
-pulumi stack output
-
-# SSH to primary node (use ssh_command output)
-ssh -i ~/.ssh/pulumi.pem ec2-user@<primary-ip>
-
-# Check Vertica version (use your configured password)
-export VERTICA_PASSWORD="$(pulumi stack output admin_password 2>/dev/null || echo 'your-password')"
-/opt/vertica/bin/vsql -U dbadmin -d analytics -w "$VERTICA_PASSWORD" -c "SELECT version();"
-/opt/vertica/bin/vsql -U dbadmin -d analytics -w "$VERTICA_PASSWORD" -c "SELECT * FROM nodes;"
-```
-
-### 5. Destroy
+After infrastructure is ready, create the database:
 
 ```bash
-pulumi destroy --yes
-pulumi stack rm my-cluster --yes
+# Using the CLI tool
+python scripts/vertica-cli.py create-db \
+  --hosts $(pulumi stack output node_ips) \
+  --db-name analytics \
+  --wait
+
+# Or for Eon Mode
+python scripts/vertica-cli.py create-db \
+  --hosts $(pulumi stack output node_ips) \
+  --db-name analytics \
+  --eon-mode \
+  --shard-count 6 \
+  --wait
 ```
 
-## Deployment Modes
+## CLI Usage
 
-### Enterprise Mode
+### Database Lifecycle
 
 ```bash
-cp config/vertica-cluster.yaml.example config/config.yaml
-# Edit config.yaml with your settings
-pulumi stack init ee-cluster
-pulumi up
-python scripts/install_vertica_ee.py --config config.yaml --rpm-path /path/to/vertica.rpm --license-path /path/to/license.xml
+# Create database
+python scripts/vertica-cli.py create-db --hosts 10.0.1.10,10.0.1.11,10.0.1.12 --db-name analytics --wait
+
+# Start database
+python scripts/vertica-cli.py start-db --hosts 10.0.1.10,10.0.1.11,10.0.1.12 --db-name analytics
+
+# Stop database
+python scripts/vertica-cli.py stop-db --hosts 10.0.1.10,10.0.1.11,10.0.1.12 --db-name analytics
+
+# Drop database
+python scripts/vertica-cli.py drop-db --hosts 10.0.1.10,10.0.1.11,10.0.1.12 --db-name analytics --force
+
+# Revive Eon Mode database
+python scripts/vertica-cli.py revive-db \
+  --hosts 10.0.1.10,10.0.1.11,10.0.1.12 \
+  --db-name analytics \
+  --communal-path s3://my-bucket/vertica/communal
 ```
 
-For detailed EE instructions: **[README_EE.md](README_EE.md)**
-
-### Eon Mode
+### Node Management
 
 ```bash
-# Generate configuration interactively
-python scripts/generate_eon_config.py --interactive --output config/config_eon.yaml
+# Add node
+python scripts/vertica-cli.py add-node \
+  --hosts 10.0.1.10,10.0.1.11,10.0.1.12 \
+  --new-host 10.0.1.13
 
-# Or copy and edit the example
-cp config/vertica-cluster-eon.yaml.example config/config_eon.yaml
-# Edit config_eon.yaml - IMPORTANT: Change the default password and use IAM roles if possible
+# Remove node
+python scripts/vertica-cli.py remove-node \
+  --hosts 10.0.1.10,10.0.1.11,10.0.1.12,10.0.1.13 \
+  --remove-host 10.0.1.13
 
-# Deploy infrastructure
-pulumi stack init eon-cluster
-pulumi up
-
-# Install Vertica with Eon Mode automation
-python scripts/install_vertica_eon.py --config config/config_eon.yaml --rpm-path /path/to/vertica.rpm --license-path /path/to/license.xml
+# Restart node
+python scripts/vertica-cli.py restart-node \
+  --hosts 10.0.1.10,10.0.1.11,10.0.1.12 \
+  --node 10.0.1.11
 ```
 
-**Security Note:** Eon Mode requires S3 access. Always use IAM instance profiles instead of embedding AWS credentials in configuration files. See `README_EON.md` for IAM setup instructions.
+### Subcluster Management
 
-For detailed Eon instructions: **[README_EON.md](README_EON.md)**
+```bash
+# Add subcluster
+python scripts/vertica-cli.py add-subcluster \
+  --hosts 10.0.1.10,10.0.1.11,10.0.1.12 \
+  --name reporting \
+  --sc-hosts 10.0.1.13,10.0.1.14
 
-## Documentation
-
-- **[Architecture Overview](docs/ARCHITECTURE.md)** - System design and components
-- **[Configuration Reference](docs/CONFIGURATION.md)** - All configuration options
-- **[Enterprise Deployment Guide](docs/DEPLOYMENT.md)** - Detailed EE deployment
-- **[Eon Mode Deployment Guide](docs/DEPLOYMENT_EON.md)** - Detailed Eon deployment with S3 setup
-- **[Project Summary](SUMMARY.md)** - Repository structure and quick reference
-
-## Security Best Practices
-
-1. **Passwords**: Always change the default password in configuration files
-2. **AWS Credentials**: Use IAM instance profiles instead of access keys
-3. **S3 Buckets**: Block public access, enable versioning, use lifecycle policies
-4. **SSH Keys**: Use strong key pairs, restrict security group CIDR ranges
-5. **Certificates**: Let the scripts auto-generate or use proper CA-signed certs
-6. **Git**: Never commit credentials, certificates, or production configs (see `.gitignore`)
-
-## Project Structure
-
+# Remove subcluster
+python scripts/vertica-cli.py remove-subcluster \
+  --hosts 10.0.1.10,10.0.1.11,10.0.1.12 \
+  --name reporting
 ```
-pulumi-vertica-cluster/
-├── Pulumi.yaml                 # Project configuration
-├── __main__.py                 # Pulumi entry point
-├── requirements.txt            # Python dependencies
-├── config/                     # Configuration templates
-│   ├── vertica-cluster.yaml.example        # EE mode config
-│   └── vertica-cluster-eon.yaml.example  # Eon mode config
-├── modules/                    # Infrastructure modules
-│   ├── compute/                # Compute abstraction layer
-│   ├── deployment/             # AWS deployment orchestration
-│   └── vertica/                # Vertica management utilities
-├── scripts/                    # Deployment and utility scripts
-│   ├── install_vertica_ee.py   # EE mode installer
-│   ├── install_vertica_eon.py  # Eon mode installer
-│   ├── generate_eon_config.py  # Interactive config generator
-│   └── generate_nma_certs.py   # Certificate generation
-└── docs/                       # Documentation
-    ├── ARCHITECTURE.md         # System design
-    ├── DEPLOYMENT.md           # EE deployment guide
-    ├── DEPLOYMENT_EON.md       # Eon deployment guide
-    └── s3-lifecycle.json       # S3 bucket lifecycle config
+
+### Status & Monitoring
+
+```bash
+# Full status
+python scripts/vertica-cli.py status --hosts 10.0.1.10,10.0.1.11,10.0.1.12
+
+# Database status
+python scripts/vertica-cli.py node-status --hosts 10.0.1.10,10.0.1.11,10.0.1.12
+
+# List databases
+python scripts/vertica-cli.py list-db --host 10.0.1.10
+
+# Show cluster configuration
+python scripts/vertica-cli.py show-cluster --hosts 10.0.1.10,10.0.1.11,10.0.1.12
+```
+
+### Maintenance
+
+```bash
+# Rolling restart (maintains availability)
+python scripts/vertica-cli.py rolling-restart \
+  --hosts 10.0.1.10,10.0.1.11,10.0.1.12 \
+  --batch-size 1 \
+  --wait 30
+
+# Re-IP after node replacement
+python scripts/vertica-cli.py re-ip \
+  --hosts 10.0.1.10,10.0.1.11,10.0.1.12 \
+  --old-ips 10.0.1.11 \
+  --new-ips 10.0.1.20
+```
+
+## Cost Management
+
+### Stop Instances (hibernate)
+
+To save costs when the database is not needed:
+
+```bash
+# Stop database first
+python scripts/vertica-cli.py stop-db --hosts ... --db-name analytics
+
+# Stop EC2 instances
+aws ec2 stop-instances --instance-ids $(pulumi stack output node_ids)
+```
+
+### Start Instances (resume)
+
+```bash
+# Start EC2 instances
+aws ec2 start-instances --instance-ids $(pulumi stack output node_ids)
+
+# Wait for instances to be ready, then start database
+python scripts/vertica-cli.py start-db --hosts ... --db-name analytics
+```
+
+### Terminate (destroy)
+
+```bash
+# Destroy everything (Pulumi handles cleanup)
+pulumi destroy
+```
+
+## Pulumi Dynamic Resources
+
+The project also provides Pulumi dynamic resources for declarative management:
+
+```python
+from modules.vertica import VerticaDatabase, VerticaNodePool, VerticaSubcluster
+
+# Create a database
+db = VerticaDatabase("analytics-db",
+    db_name="analytics",
+    hosts="10.0.1.10,10.0.1.11,10.0.1.12",
+    eon_mode=True,
+    shard_count=6,
+)
+
+# Manage node pool
+nodes = VerticaNodePool("analytics-nodes",
+    db_name="analytics",
+    hosts="10.0.1.10,10.0.1.11,10.0.1.12",
+    new_hosts="10.0.1.13",  # Add new node
+)
+
+# Manage subcluster
+reporting = VerticaSubcluster("reporting-subcluster",
+    db_name="analytics",
+    hosts="10.0.1.10,10.0.1.11,10.0.1.12",
+    subcluster_name="reporting",
+    sc_hosts="10.0.1.13,10.0.1.14",
+)
+```
+
+## Python API
+
+Use the modules directly in Python:
+
+```python
+from modules.vertica import VClusterManager
+from modules.cluster_management import ClusterLifecycleManager
+from modules.compute import AWSComputeProvider
+
+# Configuration
+vertica_config = {
+    "cluster_name": "my-cluster",
+    "database": {"name": "analytics", "admin_username": "dbadmin"},
+    "nodes": {"data_path": "/data/vertica", "catalog_path": "/data/catalog"},
+}
+
+# Create managers
+vcluster = VClusterManager(vertica_config)
+compute = AWSComputeProvider({"aws": {"region": "us-east-1"}})
+lifecycle = ClusterLifecycleManager(vcluster, compute, vertica_config)
+
+# Full lifecycle operations
+from modules.compute.base import ClusterBuilder
+
+cluster = ClusterBuilder.from_ips(["10.0.1.10", "10.0.1.11", "10.0.1.12"])
+
+# Create database
+result = lifecycle.create_cluster("my-cluster", node_count=3)
+
+# Scale out
+result = lifecycle.scale_out(cluster, additional_nodes=2)
+
+# Scale in
+result = lifecycle.scale_in(cluster, nodes_to_remove=["10.0.1.13"], terminate=True)
+
+# Start/Stop database
+result = lifecycle.stop_database(cluster)
+result = lifecycle.start_database(cluster)
+
+# Destroy everything
+result = lifecycle.destroy_cluster(cluster)
+```
+
+## Testing
+
+```bash
+# Run unit tests
+python -m pytest tests/ -v
+
+# Test vcluster commands (dry-run)
+python scripts/vertica-cli.py status --hosts 10.0.1.10 --verbose
 ```
 
 ## Troubleshooting
 
-### SSH Permission Denied
-- Verify the SSH key pair name in AWS matches your `.pem` file
-- Ensure key file permissions are `600`: `chmod 600 ~/.ssh/your-key.pem`
+### vcluster not found
 
-### File Upload Timeout
-The RPM file is large (~750MB). Upload may take several minutes. The code includes retry logic with exponential backoff. If upload fails:
-- Use the manual install command from stack outputs
-- For Eon Mode, consider uploading RPM to S3 first, then downloading on instances
+Ensure Vertica is installed on the management node:
+```bash
+which vcluster || echo "vcluster not found - install Vertica"
+```
 
-### Installation Fails
-- Check `/var/log/cloud-init-output.log` for bootstrap errors
-- Check `/var/log/vertica-bootstrap.log` for Vertica-specific errors
-- Verify instances have internet access (for package downloads)
+### Connection refused
 
-### Database Creation Fails
-- Ensure all nodes can communicate (check security groups)
-- Verify `/data` directories exist and are writable by dbadmin
-- Check Vertica logs: `/opt/vertica/log/`
-- Verify license is installed: `/opt/vertica/config/licensing/license.xml`
+Check that nodes are running and accessible:
+```bash
+# Test SSH connectivity
+ssh -i ~/.ssh/my-key ec2-user@10.0.1.10
 
-## Configuration
+# Check Vertica service
+sudo systemctl status verticad
+```
 
-See `config/vertica-cluster.yaml.example` for all available options.
+### Database creation fails
 
-## Supported Compute Providers
+Check logs on primary node:
+```bash
+sudo tail -f /opt/vertica/log/adminTools.log
+```
 
-- [x] AWS EC2
-- [ ] Azure Virtual Machines (planned)
-- [ ] Google Compute Engine (planned)
-- [x] Existing/Bare Metal (import)
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Add tests for new vcluster commands
+4. Submit a pull request
 
 ## License
 
