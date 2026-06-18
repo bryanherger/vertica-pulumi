@@ -80,9 +80,9 @@ def load_config() -> dict:
                 cfg.setdefault("iam_instance_profile", compute_aws_cfg.get("iam_instance_profile", cfg["iam_instance_profile"]))
                 cfg.setdefault("aws_access_key_id", compute_aws_cfg.get("aws_access_key_id", cfg["aws_access_key_id"]))
                 cfg.setdefault("aws_secret_access_key", compute_aws_cfg.get("aws_secret_access_key", cfg["aws_secret_access_key"]))
-    cfg.setdefault("enable_s3_encryption", eon_cfg.get("enable_s3_encryption", False))
+                cfg.setdefault("enable_s3_encryption", eon_cfg.get("enable_s3_encryption", False))
                 cfg.setdefault("communal_region", eon_cfg.get("aws_region", cfg["region"]))
-    
+
     return cfg
 
 
