@@ -36,6 +36,7 @@ def load_config() -> dict:
     
     # Determine YAML config file path (Pulumi config overrides default)
     config_file = config.get("config_file") or os.environ.get("VERTICA_CONFIG_FILE") or "config/config.yaml"
+    pulumi.log.info(f"Loading Vertica config from: {config_file}")
     
     cfg = {
         "cluster_name": config.get("cluster_name") or "vertica-cluster",
