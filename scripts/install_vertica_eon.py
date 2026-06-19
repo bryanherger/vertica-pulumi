@@ -922,22 +922,28 @@ echo "Running as user: $(whoami), uid: $(id -u), groups: $(id -G)"
         if rc == 0:
             print(f"\n  SUCCESS: Database '{self.db_name}' {self.db_init}d successfully")
 
-            # For CREATE mode, sync catalog to ensure data is persisted to communal storage
+            # For CREATE mode, sync catalog to ensure data is persisted to communal storage.
+            # vcluster already synchronizes catalog during create_db; this is an extra safety step.
             if self.db_init == "create":
                 print("\n  Syncing catalog to communal storage...")
+                sync_sql = "SELECT sync_catalog();"
                 sync_cmd = (
-                    f"su - dbadmin -c \"/opt/vertica/bin/vsql -U {self.admin_username} "
-                    f"-d {self.db_name} -w '{self.admin_password}' -c 'SELECT sync_catalog();'\""
+                    f"set -x; "
+                    f"echo 'DEBUG: running as user $(whoami) on host $(hostname)'; "
+                    f"echo 'DEBUG: primary_ip={primary_ip} db_name={self.db_name} user={self.admin_username}'; "
+                    f"su - dbadmin -c \"timeout 60 /opt/vertica/bin/vsql -h {primary_ip} -U {self.admin_username} "
+                    f"-d {self.db_name} -w '{self.admin_password}' -X -c '{sync_sql}'\""
                 )
-                rc_sync, out_sync, err_sync = self._ssh(primary_ip, sync_cmd, timeout=120)
+                print(f"  DEBUG sync command: {sync_cmd}")
+                rc_sync, out_sync, err_sync = self._ssh(primary_ip, sync_cmd, timeout=130)
+                print(f"  DEBUG sync rc={rc_sync}")
+                print(f"  DEBUG sync stdout: {out_sync.strip()}")
+                print(f"  DEBUG sync stderr: {err_sync.strip()}")
                 if rc_sync == 0:
                     print("  Catalog synced successfully")
                     print("  IMPORTANT: Data is now persisted to S3 communal storage")
                 else:
                     print(f"  WARNING: Catalog sync returned non-zero exit code {rc_sync}")
-                    print(f"  Output: {out_sync.strip()}")
-                    if err_sync.strip():
-                        print(f"  Error: {err_sync.strip()}")
 
             # Give the database a moment to finish recovery before verification
             print("  Waiting 15 seconds for database to stabilize...")
@@ -956,26 +962,38 @@ echo "Running as user: $(whoami), uid: $(id -u), groups: $(id -G)"
         primary_ip = self.instance_ips[0]
 
         print(f"\nVerifying database '{self.db_name}'...")
+        print(f"  DEBUG: primary_ip={primary_ip} user={self.admin_username} db_name={self.db_name}")
 
         # Check if database is up (force TCP via node IP; avoids AWS local socket issues)
+        version_sql = "SELECT version();"
         check_cmd = (
-            f"su - dbadmin -c \"/opt/vertica/bin/vsql -h {primary_ip} -U {self.admin_username} "
-            f"-d {self.db_name} -w '{self.admin_password}' -c 'SELECT version();'\""
+            f"set -x; "
+            f"echo 'DEBUG: running as user $(whoami) on host $(hostname)'; "
+            f"su - dbadmin -c \"timeout 60 /opt/vertica/bin/vsql -h {primary_ip} -U {self.admin_username} "
+            f"-d {self.db_name} -w '{self.admin_password}' -X -c '{version_sql}'\""
         )
-
-        rc, out, err = self._ssh(primary_ip, check_cmd, timeout=180)
+        print(f"  DEBUG version command: {check_cmd}")
+        rc, out, err = self._ssh(primary_ip, check_cmd, timeout=130)
+        print(f"  DEBUG version rc={rc}")
+        print(f"  DEBUG version stdout: {out.strip()}")
+        print(f"  DEBUG version stderr: {err.strip()}")
 
         if rc == 0 and "Vertica" in out:
             print(f"  Database is running!")
             print(f"  Version: {out.strip()}")
 
             # Check nodes
+            nodes_sql = "SELECT * FROM nodes;"
             nodes_cmd = (
-                f"su - dbadmin -c \"/opt/vertica/bin/vsql -h {primary_ip} -U {self.admin_username} "
-                f"-d {self.db_name} -w '{self.admin_password}' -c 'SELECT * FROM nodes;'\""
+                f"set -x; "
+                f"su - dbadmin -c \"timeout 60 /opt/vertica/bin/vsql -h {primary_ip} -U {self.admin_username} "
+                f"-d {self.db_name} -w '{self.admin_password}' -X -c '{nodes_sql}'\""
             )
-
-            rc, out, err = self._ssh(primary_ip, nodes_cmd, timeout=180)
+            print(f"  DEBUG nodes command: {nodes_cmd}")
+            rc, out, err = self._ssh(primary_ip, nodes_cmd, timeout=130)
+            print(f"  DEBUG nodes rc={rc}")
+            print(f"  DEBUG nodes stdout: {out.strip()}")
+            print(f"  DEBUG nodes stderr: {err.strip()}")
             if rc == 0:
                 print(f"\n  Nodes:\n{out}")
             else:
