@@ -34,6 +34,9 @@ def load_config() -> dict:
     # Try Pulumi config first
     config = pulumi.Config()
     
+    # Determine YAML config file path (Pulumi config overrides default)
+    config_file = config.get("config_file") or os.environ.get("VERTICA_CONFIG_FILE") or "config/config.yaml"
+    
     cfg = {
         "cluster_name": config.get("cluster_name") or "vertica-cluster",
         "node_count": int(config.get("node_count") or 3),
@@ -55,10 +58,11 @@ def load_config() -> dict:
         "iam_instance_profile": config.get("iam_instance_profile") or "",
         "connect_via_public_ip": config.get_bool("connect_via_public_ip") or False,
         "run_db_create_inline": config.get_bool("run_db_create_inline") or False,
+        "config_file": config_file,
     }
     
     # Try YAML config file as fallback
-    config_path = Path("config/config.yaml")
+    config_path = Path(config_file)
     if config_path.exists():
         with open(config_path) as f:
             yaml_cfg = yaml.safe_load(f)
