@@ -89,6 +89,7 @@ class VerticaEonInstaller:
         self.s3_endpoint = self.eon_config.get('s3_endpoint', '')
         self.aws_enable_https = self.eon_config.get('aws_enable_https', True)
         self.enable_s3_encryption = self.eon_config.get('enable_s3_encryption', True)
+        self.s3_auth_mode = self.compute_config.get('aws', {}).get('s3_auth_mode', 'iam_role')
 
         # Certificate settings
         self.security_config = self.vertica_config.get('security', {})
@@ -470,15 +471,17 @@ class VerticaEonInstaller:
             cmd_parts.extend(["--password", self.admin_password])
         
         # Add AWS config parameters
-        # --get-aws-credentials-from-env-vars is a standalone flag for IAM instance profiles.
-        # Region/HTTPS use --config-param key=value format.
-        if self.aws_access_key and self.aws_secret_key:
+        # IAM role (default): no AWS auth flags; vcluster uses instance metadata service.
+        # Access keys: pass AWSAuth via --config-param.
+        # Env vars: pass --get-aws-credentials-from-env-vars flag.
+        if self.s3_auth_mode == "access_keys" and self.aws_access_key and self.aws_secret_key:
             cmd_parts.extend([
                 "--config-param",
                 f"AWSAuth={self.aws_access_key}:{self.aws_secret_key}"
             ])
-        else:
+        elif self.s3_auth_mode == "env_vars":
             cmd_parts.append("--get-aws-credentials-from-env-vars")
+        # For "iam_role" (or unset), rely on instance profile / IMDS and pass nothing.
         
         cmd_parts.extend([
             "--config-param",
