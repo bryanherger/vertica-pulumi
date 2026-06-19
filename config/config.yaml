@@ -1,27 +1,57 @@
-# Vertica Cluster Configuration
-# This is a PRODUCTION config file (gitignored)
+# Vertica Cluster Configuration (default)
+#
+# This is the default file loaded by __main__.py when no Pulumi config key
+# `vertica:config_file` or VERTICA_CONFIG_FILE environment variable is set.
+#
+# For the recommended Eon Mode workflow, copy config/vertica-cluster-eon.yaml.example
+# to config/config_eon.yaml and point Pulumi at it:
+#
+#   pulumi config set vertica:config_file config/config_eon.yaml
+#
+# This default config is also kept in the new Eon Mode shape for convenience.
 
 compute:
   provider: aws
   aws:
     region: us-east-2
-    instance_type: r6i.2xlarge
     key_name: pulumi
+    instance_type: r6i.2xlarge
     root_volume_size: 100
+    connect_via_public_ip: true
+    run_db_create_inline: false
+    s3_auth_mode: iam_role
     additional_volumes:
       - size: 500
         type: gp3
         mount_point: /data
     security_group_rules:
       - protocol: tcp
-        port: 5433
+        port: 22
         cidr: 0.0.0.0/0
       - protocol: tcp
-        port: 22
+        port: 5433
         cidr: 0.0.0.0/0
       - protocol: tcp
         port: 5444
         cidr: 0.0.0.0/0
+      - protocol: tcp
+        port: 5554
+        cidr: 0.0.0.0/0
+      - protocol: tcp
+        port: 8443
+        cidr: 0.0.0.0/0
+      - protocol: tcp
+        from_port: 5434
+        to_port: 5444
+        cidr: 0.0.0.0/0
+      - protocol: tcp
+        from_port: 4803
+        to_port: 4803
+        cidr: 10.0.0.0/16
+      - protocol: tcp
+        from_port: 6543
+        to_port: 6543
+        cidr: 10.0.0.0/16
     tags:
       Environment: development
       Project: vertica-cluster
@@ -29,21 +59,27 @@ compute:
 vertica:
   version: "25.4.0-6"
   cluster_name: vertica-cluster
+  mode: eon
 
-  # License Configuration (Required for Vertica 26.1+)
   license:
     local_path: "~/Downloads/vertica_license.xml"
 
-  # RPM Configuration - Pulumi will automatically install Vertica during deployment
   rpm:
     local_path: "~/Downloads/vertica-25.4.0-6.RHEL8.x86_64.rpm"
-    # Alternative: download_url: "https://your-server.com/vertica-25.4.0-6.RHEL8.x86_64.rpm"
 
   database:
     name: analytics
     admin_username: dbadmin
     admin_password: "CHANGE_ME_USE_STRONG_PASSWORD"
-    # auto_create: false  # Set to true to automatically create database
+
+  eon:
+    communal_storage_location: "s3://vertica-pulumi-bryanh/analytics"
+    shard_count: 3
+    depot_path: /data/depot
+    depot_size: "80%"
+    aws_region: "us-east-2"
+    aws_enable_https: true
+    enable_s3_encryption: true
 
   nodes:
     count: 3
@@ -54,26 +90,33 @@ vertica:
     port: 5433
     rest_api_port: 5444
 
+  security:
+    generate_nma_certs: true
+    cert_validity_days: 365
+    cert_country: "US"
+    cert_state: "California"
+    cert_locality: "San Francisco"
+    cert_org: "MyOrganization"
+    cert_ou: "DataPlatform"
+    cert_cn: "vertica-nma"
+
 bootstrap:
-  # Pre-install Vertica prerequisites during cloud-init
-  # These are installed BEFORE Vertica RPM to ensure dependencies are met
   prerequisites:
     - dialog
     - pcre
     - pcre2
     - sysstat
     - libxcrypt-compat
-    - wget
-    # NOTE: curl intentionally omitted - Amazon Linux 2023 ships curl-minimal
-    # which conflicts with the curl package. wget is used for downloads instead.
 
   packages:
     - vim
     - htop
     - tmux
+    - wget
     - net-tools
     - psmisc
     - lsof
+    - aws-cli
 
   pre_install:
     - "sysctl -w vm.max_map_count=262144"
@@ -84,9 +127,7 @@ bootstrap:
     - "echo '/swapfile none swap sw 0 0' >> /etc/fstab"
     - "echo 'dbadmin soft nofile 65536' >> /etc/security/limits.conf"
     - "echo 'dbadmin hard nofile 65536' >> /etc/security/limits.conf"
-    - "blockdev --setra 2048 /dev/nvme1n1 || true"
-    - "echo 'export TZ=UTC' >> /home/dbadmin/.bashrc"
-    - "usermod -g verticadba dbadmin || true"
+    - "mkdir -p /data/depot /data/vertica /data/catalog"
 
   post_install:
     - "echo 'Bootstrap complete' >> /var/log/vertica-bootstrap.log"

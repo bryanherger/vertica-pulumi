@@ -1,5 +1,10 @@
 # Test Eon Mode Configuration
-# Generated for testing with reasonable defaults
+#
+# This is a tracked test fixture. It reflects the current supported Eon Mode
+# workflow: public-IP SSH, private-IP vcluster, IAM instance profile for S3,
+# and TLS generated locally by the installer.
+#
+# Copy to config/config_eon.yaml and edit for your own deployment.
 
 compute:
   provider: aws
@@ -8,26 +13,41 @@ compute:
     key_name: pulumi
     instance_type: r6i.2xlarge
     root_volume_size: 100
+    connect_via_public_ip: true
+    run_db_create_inline: false
+    s3_auth_mode: iam_role
     additional_volumes:
       - size: 500
         type: gp3
         mount_point: /data
     security_group_rules:
       - protocol: tcp
-        port: 5433
+        port: 22
         cidr: 0.0.0.0/0
       - protocol: tcp
-        port: 22
+        port: 5433
         cidr: 0.0.0.0/0
       - protocol: tcp
         port: 5444
         cidr: 0.0.0.0/0
       - protocol: tcp
+        port: 5554
+        cidr: 0.0.0.0/0
+      - protocol: tcp
         port: 8443
         cidr: 0.0.0.0/0
       - protocol: tcp
-        port: 5554
+        from_port: 5434
+        to_port: 5444
         cidr: 0.0.0.0/0
+      - protocol: tcp
+        from_port: 4803
+        to_port: 4803
+        cidr: 10.0.0.0/16
+      - protocol: tcp
+        from_port: 6543
+        to_port: 6543
+        cidr: 10.0.0.0/16
     tags:
       Environment: test
       Project: vertica-eon-test
@@ -36,10 +56,10 @@ vertica:
   version: "25.4.0-6"
   cluster_name: vertica-eon-test
   mode: eon
-  
+
   license:
     local_path: "/home/bryan/Downloads/vertica_license.xml"
-    
+
   rpm:
     local_path: "/home/bryan/Downloads/vertica-25.4.0-6.RHEL8.x86_64.rpm"
 
@@ -47,7 +67,7 @@ vertica:
     name: eon_test_db
     admin_username: dbadmin
     admin_password: "CHANGE_ME_USE_STRONG_PASSWORD"
-    
+
   eon:
     communal_storage_location: "s3://vertica-pulumi-bryanh/eon_test_db"
     shard_count: 3
@@ -65,12 +85,15 @@ vertica:
   network:
     port: 5433
     rest_api_port: 5444
-    
+
   security:
     generate_nma_certs: true
     cert_validity_days: 365
     cert_country: "US"
+    cert_state: "California"
+    cert_locality: "San Francisco"
     cert_org: "TestOrg"
+    cert_ou: "DataPlatform"
     cert_cn: "vertica-nma-test"
 
 bootstrap:
@@ -80,7 +103,7 @@ bootstrap:
     - pcre2
     - sysstat
     - libxcrypt-compat
-    
+
   packages:
     - vim
     - htop
@@ -90,7 +113,7 @@ bootstrap:
     - psmisc
     - lsof
     - aws-cli
-    
+
   pre_install:
     - "sysctl -w vm.max_map_count=262144"
     - "echo 'vm.max_map_count=262144' >> /etc/sysctl.conf"
@@ -100,10 +123,7 @@ bootstrap:
     - "echo '/swapfile none swap sw 0 0' >> /etc/fstab"
     - "echo 'dbadmin soft nofile 65536' >> /etc/security/limits.conf"
     - "echo 'dbadmin hard nofile 65536' >> /etc/security/limits.conf"
-    - "mkdir -p /data/depot"
-    - "mkdir -p /home/dbadmin/.aws"
-    
+    - "mkdir -p /data/depot /data/vertica /data/catalog"
+
   post_install:
     - "echo 'Bootstrap complete' >> /var/log/vertica-bootstrap.log"
-    - "systemctl enable vertica-nma || true"
-    - "systemctl start vertica-nma || true"

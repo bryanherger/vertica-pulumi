@@ -1,105 +1,104 @@
 # Project Summary
 
-This repository contains Pulumi infrastructure code and deployment scripts for Vertica database clusters on AWS.
+This repository deploys Vertica database clusters on AWS using Pulumi. The maintained and tested workflow is **Eon Mode on AWS**.
 
 ## Modes Supported
 
 | Mode | Use Case | Key Files |
 |------|----------|-----------|
-| **Enterprise (EE)** | Traditional, data-local mode | `README_EE.md`, `scripts/install_vertica_ee.py`, `config/vertica-cluster.yaml.example` |
-| **Eon** | Cloud-optimized, separate compute/storage | `README_EON.md`, `scripts/install_vertica_eon.py`, `config/vertica-cluster-eon.yaml.example` |
+| **Eon** (current) | Cloud-optimized, separate compute/storage | `README_EON.md`, `scripts/install_vertica_eon.py`, `config/vertica-cluster-eon.yaml.example` |
+| **Enterprise (EE)** (legacy) | Traditional data-local mode | `README_EE.md`, `scripts/install_vertica_ee.py`, `config/vertica-cluster.yaml.example` |
 
 ## Quick Links
 
-- [Enterprise Mode Quick Start](README_EE.md)
-- [Eon Mode Quick Start](README_EON.md)
-- [Architecture Documentation](docs/ARCHITECTURE.md)
-- [Enterprise Deployment Guide](docs/DEPLOYMENT.md)
-- [Eon Deployment Guide](docs/DEPLOYMENT_EON.md)
-- [Configuration Reference](docs/CONFIGURATION.md)
+- **[Eon Mode Quick Start](README_EON.md)**
+- **[Eon Mode Deployment Guide](docs/DEPLOYMENT_EON.md)**
+- **[Configuration Reference](docs/CONFIGURATION.md)**
+- **[Architecture Overview](docs/ARCHITECTURE.md)**
+- **[Operations Guide](docs/OPERATIONS.md)**
+- **[Enterprise Mode Notes (legacy)](README_EE.md)**
 
 ## Repository Structure
 
 ```
-├── config/                          # Configuration templates
-│   ├── vertica-cluster.yaml.example        # EE mode config
-│   └── vertica-cluster-eon.yaml.example  # Eon mode config
-├── docs/                            # Documentation
-│   ├── ARCHITECTURE.md              # System design
-│   ├── DEPLOYMENT.md                # EE deployment guide
-│   ├── DEPLOYMENT_EON.md            # Eon deployment guide
-│   ├── CONFIGURATION.md             # Config reference
-│   └── AWS_ENV_VARS.md              # AWS setup
-├── modules/                         # Python modules
-│   ├── compute/                     # AWS/bare metal compute
-│   ├── deployment/                  # Pulumi deployment logic
-│   └── vertica/                     # Vertica management
-│       ├── install.py               # Installation helpers
-│       ├── configure.py             # Configuration
-│       ├── rest_api.py              # REST API client
-│       └── vcluster.py              # vcluster wrapper
-├── scripts/                         # Deployment scripts
-│   ├── install_vertica_ee.py        # EE mode installer
-│   ├── install_vertica_eon.py       # Eon mode installer
-│   ├── generate_nma_certs.py      # Certificate generator
-│   ├── generate_eon_config.py     # Eon config generator
-│   └── vertica-cli.py               # Management CLI
-├── __main__.py                      # Pulumi entry point
-├── README.md                        # Main readme
-├── README_EE.md                     # EE quick start
-├── README_EON.md                    # Eon quick start
-└── requirements.txt                 # Python dependencies
+├── config/                              # Configuration templates
+│   ├── vertica-cluster-eon.yaml.example # Current Eon config example
+│   ├── vertica-cluster.yaml.example     # Legacy Enterprise config example
+│   ├── config.yaml                      # Default config (Eon shape)
+│   └── config_eon_test.yaml             # Test fixture
+├── docs/                                # Documentation
+│   ├── DEPLOYMENT_EON.md              # Complete Eon deployment guide
+│   ├── DEPLOYMENT.md                  # Generic deployment pointers
+│   ├── CONFIGURATION.md               # All YAML options
+│   ├── ARCHITECTURE.md                # Design overview
+│   ├── OPERATIONS.md                  # Day-two operations
+│   └── AWS_ENV_VARS.md                # AWS setup and IAM
+├── modules/                             # Python modules
+│   ├── pulumi_resources.py              # AWS resource builders
+│   ├── pulumi_vertica_resources.py      # Vertica-specific resources
+│   ├── compute/                         # Compute provider logic (legacy/optional)
+│   ├── deployment/                      # Pulumi deployment logic (legacy/optional)
+│   └── vertica/                         # Vertica management helpers (legacy/optional)
+├── scripts/                             # Deployment and helper scripts
+│   ├── install_vertica_eon.py         # Main Eon installer
+│   ├── generate_eon_config.py         # Eon config generator
+│   ├── generate_nma_certs.py          # Legacy NMA-only cert generator
+│   ├── install_vertica.py             # Legacy Enterprise installer
+│   ├── install_vertica_ee.py          # Legacy Enterprise installer
+│   └── vertica-cli.py                   # Optional management CLI
+├── __main__.py                          # Main Pulumi program
+├── README.md                            # Project overview
+├── README_EON.md                        # Eon quick start
+├── README_EE.md                         # Legacy Enterprise notes
+└── requirements.txt                     # Python dependencies
 ```
 
 ## Key Features
 
 ### Infrastructure (Pulumi)
-- Multi-node EC2 deployment with configurable instance types
-- VPC, subnet, and security group management
-- SSH key-based access
-- Additional EBS volumes for data/catalog/depot
-- Cloud-init bootstrap with prerequisite installation
 
-### Enterprise Mode
-- Full automated Vertica EE installation
-- RPM and license distribution to all nodes
-- Database creation with admintools
-- Cluster status verification
+- VPC, subnet, internet gateway, route table, and security group.
+- Multi-node EC2 deployment on Amazon Linux 2023.
+- Dedicated EBS volume mounted at `/data` for depot, catalog, and data.
+- IAM instance profile for S3 communal storage access (no embedded keys).
+- Public-IP SSH support for external Pulumi runners.
+- Private-IP internal Vertica communication.
+- Cloud-init bootstrap with prerequisite installation.
 
-### Eon Mode
-- S3 communal storage configuration
-- Depot location and size management
-- Shard count configuration
-- Automatic RSA key/certificate generation
-- NMA (Node Management Agent) certificate deployment
-- NMA and HTTPS service startup
-- vcluster-based database creation
+### Eon Mode Workflow
+
+- S3 communal storage.
+- Local depot with configurable size and path.
+- TLS bootstrap material generated on the runner and deployed to all nodes (no node-to-node SSH).
+- Node Management Agent (NMA) and HTTPS service startup.
+- `vcluster create_db` / `vcluster revive_db` database creation.
+- Post-creation catalog sync and verification.
 
 ## Scripts Reference
 
 | Script | Purpose | Usage |
 |--------|---------|-------|
-| `install_vertica_ee.py` | EE mode full installation | `python scripts/install_vertica_ee.py --config config.yaml --rpm-path ...` |
-| `install_vertica_eon.py` | Eon mode full installation | `python scripts/install_vertica_eon.py --config config_eon.yaml --rpm-path ...` |
-| `generate_nma_certs.py` | Generate + deploy NMA certs | `python scripts/generate_nma_certs.py --hosts ... --ssh-key ...` |
-| `generate_eon_config.py` | Interactive config generator | `python scripts/generate_eon_config.py --interactive` |
-| `vertica-cli.py` | Cluster management CLI | `python scripts/vertica-cli.py --help` |
+| `install_vertica_eon.py` | Full Eon installation and database creation | `python scripts/install_vertica_eon.py --config config/config_eon.yaml --ssh-key ~/.ssh/key.pem` |
+| `generate_eon_config.py` | Interactive/config-driven Eon config generator | `python scripts/generate_eon_config.py --interactive` |
+| `install_vertica_ee.py` | Legacy Enterprise installer (not maintained) | `python scripts/install_vertica_ee.py --config config/config.yaml --rpm-path ...` |
+| `generate_nma_certs.py` | Legacy NMA-only cert generator | Not needed for current Eon flow |
+| `vertica-cli.py` | Optional cluster management CLI | `python scripts/vertica-cli.py --help` |
 
 ## Requirements
 
-- Python 3.6+
+- Python 3.8+
 - Pulumi CLI
-- AWS CLI (configured)
+- AWS CLI configured with credentials
 - Vertica RPM file
-- Vertica license (26.1+)
-- PyYAML: `pip install pyyaml`
-- Pulumi packages: `pip install -r requirements.txt`
+- Vertica license XML (26.1+)
+- `pip install -r requirements.txt`
 
 ## Getting Started
 
-1. Choose your mode (EE or Eon)
-2. Read the corresponding quick start guide
-3. Generate or edit configuration
-4. Deploy infrastructure with Pulumi
-5. Run the installation script
-6. Verify database connectivity
+1. Read [README_EON.md](README_EON.md).
+2. Copy `config/vertica-cluster-eon.yaml.example` to `config/config_eon.yaml` and edit it.
+3. Deploy infrastructure with `pulumi up`.
+4. Install Vertica and create the database with `scripts/install_vertica_eon.py`.
+5. Verify database connectivity.
+
+The Enterprise Mode scripts and documentation remain in the repository for historical reference but are no longer the recommended path.

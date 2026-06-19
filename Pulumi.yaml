@@ -1,5 +1,5 @@
 name: pulumi-vertica-cluster
-description: A minimal AWS Python Pulumi program
+description: Deploy a Vertica Eon Mode cluster on AWS using Pulumi
 runtime:
   name: python
   options:

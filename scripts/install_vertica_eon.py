@@ -396,83 +396,6 @@ class VerticaEonInstaller:
 
         return all_success
 
-    def _setup_root_ssh_between_nodes(self) -> bool:
-        """
-        Configure passwordless root SSH between all cluster nodes so that
-        install_vertica can run in multi-node mode and generate per-node certs.
-        """
-        if not self.instance_ips:
-            return False
-
-        print("\n  Setting up root SSH between cluster nodes...")
-
-        with open(self.ssh_key_path, 'r') as f:
-            key_material = f.read().strip()
-        pub_key_material = None
-        pub_key_path = self.ssh_key_path + '.pub'
-        if os.path.exists(pub_key_path):
-            with open(pub_key_path, 'r') as f:
-                pub_key_material = f.read().strip()
-        else:
-            # Derive public key from private key
-            result = subprocess.run(
-                ["ssh-keygen", "-y", "-f", self.ssh_key_path],
-                capture_output=True, text=True
-            )
-            if result.returncode == 0:
-                pub_key_material = result.stdout.strip()
-            else:
-                print(f"    ERROR: Could not derive public key: {result.stderr}")
-                return False
-
-        all_ok = True
-        for ip in self.instance_ips:
-            print(f"    Configuring {ip} for root SSH...")
-
-            # Build the root-SSH setup script locally and run it via base64 to avoid quoting hell.
-            setup_script = f"""#!/bin/bash
-set -e
-mkdir -p /root/.ssh
-chmod 700 /root/.ssh
-cat > /root/.ssh/id_rsa <<'KEYEOF'
-{key_material}
-KEYEOF
-chmod 600 /root/.ssh/id_rsa
-if [ ! -f /root/.ssh/authorized_keys ] || ! grep -qF '{pub_key_material}' /root/.ssh/authorized_keys; then
-    echo '{pub_key_material}' >> /root/.ssh/authorized_keys
-fi
-chmod 600 /root/.ssh/authorized_keys
-if [ -f /etc/ssh/sshd_config ]; then
-    sed -i 's/^#*\\s*PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
-    sed -i 's/^#*\\s*PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
-fi
-systemctl reload sshd || service sshd reload || true
-"""
-            encoded = base64.b64encode(setup_script.encode('utf-8')).decode('utf-8')
-            cmd = f"echo '{encoded}' | base64 -d | sudo bash"
-            rc, out, err = self._ssh(ip, cmd, sudo=False, timeout=60)
-            if rc != 0:
-                print(f"      FAILED: {err}")
-                all_ok = False
-            else:
-                # Quick connectivity test from each node to every other node
-                for other_ip in self.instance_private_ips:
-                    if other_ip == self.instance_private_ips[self.instance_ips.index(ip)]:
-                        continue
-                    test_script = f"""#!/bin/bash
-ssh -i /root/.ssh/id_rsa -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@{other_ip} 'echo ROOT_SSH_OK' 2>&1
-"""
-                    test_encoded = base64.b64encode(test_script.encode('utf-8')).decode('utf-8')
-                    test_cmd = f"echo '{test_encoded}' | base64 -d | sudo bash"
-                    rc2, out2, err2 = self._ssh(ip, test_cmd, sudo=False, timeout=30)
-                    if rc2 != 0 or 'ROOT_SSH_OK' not in out2:
-                        print(f"      WARNING: root SSH from {ip} to {other_ip} failed: {err2.strip() or out2.strip()}")
-                        all_ok = False
-                    else:
-                        print(f"      OK: root SSH {ip} -> {other_ip}")
-
-        return all_ok
-
     def generate_tls_material_no_ssh(self) -> bool:
         """
         Generate Vertica NMA/HTTPS TLS material on the local Pulumi runner and
@@ -895,7 +818,7 @@ openssl ca -config vertica_https_openssl.cnf \\
         script_content = f"""#!/bin/bash
 set -e
 export PATH=$PATH:/opt/vertica/bin
-echo "Running as user: $(whoami), uid: $(id -u), groups: $(id -G)"
+cd /tmp
 /opt/vertica/bin/{vcluster_cmd}
 """
         script_path = "/tmp/vcluster_create_db.sh"
@@ -912,7 +835,7 @@ echo "Running as user: $(whoami), uid: $(id -u), groups: $(id -G)"
             return False
 
         # Make executable and run as dbadmin
-        exec_cmd = f"chmod +x {script_path} && sudo su - dbadmin -c '{script_path}'"
+        exec_cmd = f"chmod +x {script_path} && sudo -u dbadmin {script_path}"
         rc, out, err = self._ssh(primary_ip, exec_cmd, timeout=600)
 
         print(f"\n  Output:\n{out}")
