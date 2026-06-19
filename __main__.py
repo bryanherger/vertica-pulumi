@@ -53,6 +53,7 @@ def load_config() -> dict:
         "aws_access_key_id": config.get("aws_access_key_id") or "",
         "aws_secret_access_key": config.get_secret("aws_secret_access_key") or "",
         "iam_instance_profile": config.get("iam_instance_profile") or "",
+        "connect_via_public_ip": config.get_bool("connect_via_public_ip") or False,
     }
     
     # Try YAML config file as fallback
@@ -74,7 +75,8 @@ def load_config() -> dict:
                 cfg.setdefault("eon_mode", vertica_cfg.get("mode", "").lower() == "eon" or bool(vertica_cfg.get("communal_storage")) or bool(eon_cfg.get("communal_storage_location")))
                 cfg.setdefault("region", compute_aws_cfg.get("region", aws_cfg.get("region", cfg["region"])))
                 cfg.setdefault("instance_type", compute_aws_cfg.get("instance_type", aws_cfg.get("instance_type", cfg["instance_type"])))
-                cfg.setdefault("key_name", compute_aws_cfg.get("key_name", aws_cfg.get("key_name", cfg["key_name"])))
+                cfg["key_name"] = compute_aws_cfg.get("key_name") or aws_cfg.get("key_name") or cfg["key_name"]
+                cfg["connect_via_public_ip"] = compute_aws_cfg.get("connect_via_public_ip") or cfg["connect_via_public_ip"]
                 cfg.setdefault("communal_path", eon_cfg.get("communal_storage_location", cfg["communal_path"]))
                 cfg.setdefault("s3_auth_mode", compute_aws_cfg.get("s3_auth_mode", cfg["s3_auth_mode"]))
                 cfg.setdefault("iam_instance_profile", compute_aws_cfg.get("iam_instance_profile", cfg["iam_instance_profile"]))
@@ -390,7 +392,8 @@ try:
     )
     
     # Command to create database (run on primary node)
-    primary_ip = instances[0].private_ip
+    # Use public IP when running Pulumi from outside the VPC, private IP otherwise.
+    primary_ip = instances[0].public_ip if cfg.get("connect_via_public_ip") else instances[0].private_ip
     
     # Wait for instances to be ready
     readiness = command.local.Command(
@@ -399,16 +402,17 @@ try:
         triggers=[inst.id for inst in instances],
     )
     
-    # Create database command
-    create_db_cmd = command.remote.Command(
-        "create-database",
-        connection=command.remote.ConnectionArgs(
-            host=primary_ip,
-            user="ec2-user",
-            private_key=open(os.path.expanduser(f"~/.ssh/{cfg['key_name']}.pem")).read() if cfg["key_name"] else "",
-        ),
-        create=pulumi.Output.all(hosts_str).apply(
-            lambda h: f"""#!/bin/bash
+    # Create database command (only when an SSH key is configured)
+    if cfg.get("key_name"):
+        create_db_cmd = command.remote.Command(
+            "create-database",
+            connection=command.remote.ConnectionArgs(
+                host=primary_ip,
+                user="ec2-user",
+                private_key=open(os.path.expanduser(f"~/.ssh/{cfg['key_name']}.pem")).read(),
+            ),
+            create=pulumi.Output.all(hosts_str).apply(
+                lambda h: f"""#!/bin/bash
 set -e
 echo "Creating Vertica database..."
 /opt/vertica/bin/vcluster create_db \
@@ -421,11 +425,14 @@ echo "Creating Vertica database..."
   --db-user {cfg['db_user']}
 echo "Database created successfully"
 """
-        ),
-        opts=pulumi.ResourceOptions(depends_on=[readiness]),
-    )
-    
-    pulumi.export("db_create_status", create_db_cmd.stdout)
+            ),
+            opts=pulumi.ResourceOptions(depends_on=[readiness]),
+        )
+        
+        pulumi.export("db_create_status", create_db_cmd.stdout)
+    else:
+        pulumi.log.info("No key_name configured; skipping inline create-database remote command.")
+        pulumi.export("db_create_status", "skipped: no key_name configured")
     
 except ImportError:
     pulumi.log.warn("pulumi-command not installed. Database lifecycle commands not available.")
