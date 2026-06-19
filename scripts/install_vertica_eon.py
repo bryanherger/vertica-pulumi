@@ -473,14 +473,14 @@ ssh -i /root/.ssh/id_rsa -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@{
 
         return all_ok
 
-    def run_install_vertica_for_certs(self) -> bool:
+    def generate_tls_material_no_ssh(self) -> bool:
         """
-        Run Vertica's install_vertica script on the bootstrap node in multi-node
-        mode to generate the full set of NMA/HTTPS TLS material for every node,
-        then copy it to all nodes.
+        Generate Vertica NMA/HTTPS TLS material on the local Pulumi runner and
+        deploy it to all cluster nodes.
 
-        This is required because the vcluster HTTPS service expects the same
-        CA-signed bootstrap cert/key/CA files produced by install_vertica.
+        This mirrors what install_vertica does internally (root CA, HTTPS server
+        cert, dbadmin client cert, httpstls.json) without requiring node-to-node
+        SSH.  vcluster is then used for all cluster management.
         """
         if not self.generate_certs:
             print("Certificate generation disabled in config")
@@ -490,129 +490,246 @@ ssh -i /root/.ssh/id_rsa -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@{
             print("ERROR: No instance IPs available for cert generation")
             return False
 
-        bootstrap_public = self.instance_ips[0]
-        bootstrap_private = self.instance_private_ips[0]
-        license_dest = "/opt/vertica/config/licensing/license.xml"
-        rpm_name = os.path.basename(self.rpm_path) if getattr(self, 'rpm_path', '') else "vertica.rpm"
+        print("\nGenerating TLS material locally and deploying to all nodes...")
+        print(f"  Nodes: {', '.join(self.instance_private_ips)}")
 
-        print("\nGenerating TLS material via Vertica install_vertica...")
-        print(f"  Bootstrap node: {bootstrap_public} ({bootstrap_private})")
+        certs_dir = Path("./https_certs_gen")
+        certs_dir.mkdir(parents=True, exist_ok=True)
 
-        # Set up root SSH between nodes so install_vertica can run in multi-node mode.
-        if not self._setup_root_ssh_between_nodes():
-            print("  WARNING: Root SSH setup had issues; continuing anyway...")
+        # Build subjectAltName entries for all node private IPs, hostnames, and localhost
+        san_entries = ["DNS:localhost"]
+        for i, ip in enumerate(self.instance_private_ips):
+            san_entries.append(f"IP:{ip}")
+            san_entries.append(f"DNS:vertica-eon-node{i+1}")
+            san_entries.append(f"DNS:vertica-eon-node{i+1}.local")
+        san = ",".join(san_entries)
 
-        # Inspect install_vertica options so we can use whatever the version supports.
-        help_cmd = "bash -c '/opt/vertica/sbin/install_vertica --help 2>&1 || true'"
-        rc, help_out, _ = self._ssh(bootstrap_public, help_cmd, sudo=False, timeout=30)
+        # OpenSSL configuration file matching Vertica's expectations
+        openssl_cnf = certs_dir / "vertica_https_openssl.cnf"
+        openssl_cnf.write_text(f"""[ ca ]
+default_ca = CA_default
 
-        def flag(name: str) -> str:
-            long_dash = name.replace('_', '-')
-            for opt in (f"--{long_dash}", f"--{name}", f"--{name.replace('-', '')}"):
-                if opt in help_out:
-                    return opt
-            return ""
+[ CA_default ]
+dir = {certs_dir}
+certificate = $dir/rootca.pem
+private_key = $dir/rootca.key
+crl_dir = $dir
+database = $dir/index.txt
+new_certs_dir = $dir
+serial = $dir/serial
+RANDFILE = $dir/.rand
+default_days = 3650
+default_crl_days = 30
+default_md = sha256
+preserve = no
+policy = policy_anything
+name_opt = ca_default
+cert_opt = ca_default
+unique_subject = no
+copy_extensions = copy
 
-        no_rpm_copy = flag("no_rpm_copy") or "--no-rpm-copy"
-        failure_thr = flag("failure_threshold") or "--failure-threshold"
-        ssh_identity = flag("ssh_identity") or "--ssh-identity"
-        # install_vertica uses -L for license, not --license, but accept either
-        license_opt = "-L" if "-L " in help_out or "-L, --license" in help_out or "--license" not in help_out else "--license"
+[ req ]
+distinguished_name = req_distinguished_name
+req_extensions = v3_req
+prompt = no
 
-        # Build the install_vertica command.  Pass all hosts so it creates per-node
-        # certificates.  RPM is already on each node at /tmp/<rpm_name>.
-        hosts_arg = ",".join(self.instance_private_ips)
-        install_cmd_parts = [
-            "sudo",
-            "/opt/vertica/sbin/install_vertica",
-            "--hosts", hosts_arg,
-            "--accept-eula",
-            license_opt, license_dest,
-            "--dba-user-password-disabled",
-            no_rpm_copy,
-            "--rpm-path", f"/tmp/{rpm_name}",
-            failure_thr, "NONE",
-            ssh_identity, "/root/.ssh/id_rsa",
-        ]
+[ req_distinguished_name ]
+C = US
+ST = Massachusetts
+L = Cambridge
+O = OpenText
+OU = Vertica
 
-        install_cmd = " ".join(install_cmd_parts)
-        print(f"  Running: {install_cmd}")
+[ policy_anything ]
+countryName = optional
+stateOrProvinceName = optional
+localityName = optional
+organizationName = optional
+organizationalUnitName = optional
+commonName = optional
+emailAddress = optional
 
-        rc, out, err = self._ssh(bootstrap_public, install_cmd, sudo=False, timeout=600)
-        if rc != 0:
-            print(f"  WARNING: install_vertica returned {rc}: {err}")
-            print(f"  Output: {out.strip()}")
-            print("  Continuing anyway; TLS files may still have been generated...")
+[ root_ca ]
+basicConstraints = critical, CA:TRUE
+keyUsage = critical, keyCertSign, cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always,issuer:always
 
-        # Verify the key TLS files exist on the bootstrap node
-        verify_cmd = (
-            "ls -la /opt/vertica/config/https_certs/ 2>&1 | "
-            "grep -E 'vertica_https.pem|vertica_https.key|rootca.pem'"
+[ server_cert ]
+basicConstraints = CA:FALSE
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth, clientAuth
+subjectAltName = {san}
+
+[ usr_cert ]
+basicConstraints = CA:FALSE
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = clientAuth, emailProtection
+""")
+
+        # CA database files required by openssl ca
+        (certs_dir / "index.txt").write_text("")
+        (certs_dir / "index.txt.attr").write_text("")
+        (certs_dir / "serial").write_text("1000\n")
+
+        # Shell script based on community-provided version, fixed and adapted
+        cert_script = certs_dir / "gen_certs.sh"
+        cert_script.write_text(f"""#!/bin/bash
+set -e
+cd "{certs_dir}"
+
+touch index.txt
+# Fix typo in original script: index.txt.attr, not tndex.txt.attr
+touch index.txt.attr
+
+# Root CA
+openssl req -x509 -config vertica_https_openssl.cnf \\
+  -out rootca_cert.pem -newkey rsa:4096 -keyout rootca_key.pem \\
+  -subj /C=US/ST=Massachusetts/L=Cambridge/O=OpenText/OU=Vertica/CN=rootca \\
+  -extensions root_ca -nodes -days 3650
+
+# NMA / HTTPS server cert (signed by root CA)
+openssl req -config vertica_https_openssl.cnf \\
+  -out nma_csr.pem -newkey rsa:2048 -keyout nma_key.pem \\
+  -subj /C=US/ST=Massachusetts/L=Cambridge/O=OpenText/OU=Vertica/CN=NMA \\
+  -extensions server_cert -nodes
+
+openssl ca -config vertica_https_openssl.cnf \\
+  -in nma_csr.pem -out nma_cert.pem -extensions server_cert \\
+  -cert rootca_cert.pem -keyfile rootca_key.pem -notext -batch
+
+# httpstls.json used by the Vertica HTTPS service bootstrap
+python3 - <<'PYEOF'
+import json, pathlib
+base = pathlib.Path("{certs_dir}")
+def pem_text(name):
+    return base.joinpath(name).read_text().replace('\\n', '\\\\n')
+key = pem_text("nma_key.pem")
+cert = pem_text("nma_cert.pem")
+ca = pem_text("rootca_cert.pem")
+cfg = {{"name": "server", "cipher_suites": "", "mode": 2,
+        "key": key, "certificate": cert, "chain_certs": [],
+        "ca_certificates": [ca]}}
+base.joinpath("httpstls.json").write_text(json.dumps(cfg))
+PYEOF
+
+# dbadmin client cert (signed by root CA)
+USER=dbadmin
+openssl req -config vertica_https_openssl.cnf \\
+  -out dbadmin_csr.pem -newkey rsa:2048 -keyout dbadmin_key.pem \\
+  -subj /C=US/ST=Massachusetts/L=Cambridge/O=OpenText/OU=Vertica/CN=$USER \\
+  -extensions usr_cert -nodes
+
+openssl ca -config vertica_https_openssl.cnf \\
+  -in dbadmin_csr.pem -out dbadmin_cert.pem -extensions usr_cert \\
+  -cert rootca_cert.pem -keyfile rootca_key.pem -notext -batch
+""")
+        cert_script.chmod(0o755)
+
+        # Run the cert generation script
+        print("  Running local certificate generation script...")
+        result = subprocess.run(
+            ["bash", str(cert_script)],
+            cwd=str(certs_dir),
+            capture_output=True,
+            text=True,
+            timeout=120
         )
-        rc, out, _ = self._ssh(bootstrap_public, verify_cmd, sudo=False, timeout=30)
-        if rc != 0 or not all(name in out for name in ("vertica_https.pem", "vertica_https.key", "rootca.pem")):
-            print("  ERROR: install_vertica did not produce the expected TLS files")
-            print(f"  Listing:\n{out}")
+        if result.returncode != 0:
+            print(f"  ERROR: Cert generation failed")
+            print(f"  stdout: {result.stdout}")
+            print(f"  stderr: {result.stderr}")
             return False
 
-        print("  Bootstrap TLS files generated successfully")
+        # Rename generated files to Vertica's expected default names
+        expected_files = {
+            "rootca_cert.pem": "rootca.pem",
+            "rootca_key.pem": "rootca.key",
+            "nma_cert.pem": "vertica_https.pem",
+            "nma_key.pem": "vertica_https.key",
+            "dbadmin_cert.pem": "dbadmin.pem",
+            "dbadmin_key.pem": "dbadmin.key",
+            "httpstls.json": "httpstls.json",
+        }
+        for src_name, dst_name in expected_files.items():
+            src = certs_dir / src_name
+            dst = certs_dir / dst_name
+            if src.exists():
+                src.rename(dst)
+                print(f"  Created {dst_name}")
+            elif not dst.exists():
+                print(f"  WARNING: Expected file {src_name} not generated")
 
-        # install_vertica should have distributed certs in multi-node mode, but
-        # make sure every node has the material by copying from bootstrap anyway.
-        if len(self.instance_ips) > 1:
-            print("\nCopying TLS material from bootstrap to remaining nodes...")
-            tar_remote = "/tmp/https_certs.tar.gz"
-            tar_cmd = (
-                f"sudo tar -czf {tar_remote} -C /opt/vertica/config https_certs && "
-                f"sudo chown {self.ssh_user}:{self.ssh_user} {tar_remote} && "
-                f"chmod 644 {tar_remote}"
+        # Verify the essential files are present
+        required = ["rootca.pem", "rootca.key", "vertica_https.pem", "vertica_https.key",
+                    "dbadmin.pem", "dbadmin.key", "httpstls.json"]
+        missing = [f for f in required if not (certs_dir / f).exists()]
+        if missing:
+            print(f"  ERROR: Missing generated files: {missing}")
+            return False
+
+        # Set permissions locally
+        for key_file in certs_dir.glob("*.key"):
+            key_file.chmod(0o600)
+        for pem_file in certs_dir.glob("*.pem"):
+            pem_file.chmod(0o644)
+        (certs_dir / "httpstls.json").chmod(0o600)
+
+        # Deploy https_certs to every node
+        print("\nDeploying TLS material to all nodes...")
+        all_deployed = True
+        for ip in self.instance_ips:
+            print(f"  Deploying to {ip}...")
+            # Make a fresh tarball for this node so permissions are clean
+            tar_path = certs_dir / "https_certs.tar.gz"
+            tar_result = subprocess.run(
+                ["tar", "-czf", str(tar_path), "-C", str(certs_dir), "rootca.pem",
+                 "rootca.key", "vertica_https.pem", "vertica_https.key",
+                 "dbadmin.pem", "dbadmin.key", "httpstls.json"],
+                capture_output=True, text=True
             )
-            rc, _, err = self._ssh(bootstrap_public, tar_cmd, sudo=False, timeout=60)
-            if rc != 0:
-                print(f"  ERROR: Failed to package TLS files: {err}")
-                return False
+            if tar_result.returncode != 0:
+                print(f"    FAILED to package certs: {tar_result.stderr}")
+                all_deployed = False
+                continue
 
-            all_copied = True
-            for ip in self.instance_ips[1:]:
-                print(f"  Copying to {ip}...")
-                scp_from = f"{self.ssh_user}@{bootstrap_public}:{tar_remote}"
-                scp_to = f"{self.ssh_user}@{ip}:/tmp/https_certs.tar.gz"
-                scp_cmd = [
-                    "scp",
-                    "-i", self.ssh_key_path,
-                    "-o", "StrictHostKeyChecking=no",
-                    "-o", "BatchMode=yes",
-                    scp_from, scp_to,
-                ]
-                try:
-                    result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=180)
-                    if result.returncode != 0:
-                        print(f"    FAILED to copy tarball: {result.stderr}")
-                        all_copied = False
-                        continue
-                except Exception as e:
-                    print(f"    FAILED to copy tarball: {e}")
-                    all_copied = False
+            scp_cmd = [
+                "scp",
+                "-i", self.ssh_key_path,
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "BatchMode=yes",
+                str(tar_path),
+                f"{self.ssh_user}@{ip}:/tmp/https_certs.tar.gz",
+            ]
+            try:
+                scp_res = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=180)
+                if scp_res.returncode != 0:
+                    print(f"    FAILED to copy certs: {scp_res.stderr}")
+                    all_deployed = False
                     continue
+            except Exception as e:
+                print(f"    FAILED to copy certs: {e}")
+                all_deployed = False
+                continue
 
-                extract_cmd = (
-                    f"sudo rm -rf /opt/vertica/config/https_certs && "
-                    f"sudo mkdir -p /opt/vertica/config/https_certs && "
-                    f"sudo tar -xzf /tmp/https_certs.tar.gz -C /opt/vertica/config && "
-                    f"sudo chown -R dbadmin:verticadba /opt/vertica/config/https_certs && "
-                    f"sudo find /opt/vertica/config/https_certs -type f -name '*.key' -exec chmod 600 {{}} \\; && "
-                    f"sudo find /opt/vertica/config/https_certs -type f ! -name '*.key' -exec chmod 644 {{}} \\;"
-                )
-                rc, _, err = self._ssh(ip, extract_cmd, sudo=False, timeout=60)
-                if rc != 0:
-                    print(f"    FAILED to extract TLS files: {err}")
-                    all_copied = False
-                else:
-                    print(f"    SUCCESS")
+            extract_cmd = (
+                "sudo rm -rf /opt/vertica/config/https_certs && "
+                "sudo mkdir -p /opt/vertica/config/https_certs && "
+                "sudo tar -xzf /tmp/https_certs.tar.gz -C /opt/vertica/config/https_certs && "
+                "sudo chown -R dbadmin:verticadba /opt/vertica/config/https_certs && "
+                "sudo chmod 755 /opt/vertica/config/https_certs && "
+                "sudo find /opt/vertica/config/https_certs -type f -name '*.key' -exec chmod 600 {} \\; && "
+                "sudo find /opt/vertica/config/https_certs -type f -name '*.pem' -exec chmod 644 {} \\; && "
+                "sudo chmod 600 /opt/vertica/config/https_certs/httpstls.json"
+            )
+            rc, _, err = self._ssh(ip, extract_cmd, sudo=False, timeout=60)
+            if rc != 0:
+                print(f"    FAILED to install certs: {err}")
+                all_deployed = False
+            else:
+                print(f"    SUCCESS")
 
-            return all_copied
-
-        return True
+        return all_deployed
 
     def start_nma_services(self) -> bool:
         """Start NMA services on all nodes"""
@@ -622,20 +739,16 @@ ssh -i /root/.ssh/id_rsa -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@{
         for ip in self.instance_ips:
             print(f"  Starting NMA on {ip}...")
 
-            # Ensure standard HTTPS cert directory exists and certs are in place.
-            # NMA looks in /opt/vertica/config/https_certs by default.  If our
-            # generated certs live elsewhere, copy them to the standard names.
+            # Ensure standard HTTPS cert directory exists with correct ownership.
+            # Certs are deployed earlier by generate_tls_material_no_ssh; do not
+            # overwrite them with fallback files.
             cert_setup_cmd = (
                 f"mkdir -p /opt/vertica/config/https_certs && "
                 f"chown dbadmin:verticadba /opt/vertica/config/https_certs && "
                 f"chmod 755 /opt/vertica/config/https_certs && "
-                f"if [ -f /opt/vertica/config/share/nma_cert.pem ]; then "
-                f"  cp /opt/vertica/config/share/nma_cert.pem /opt/vertica/config/https_certs/dbadmin.pem && "
-                f"  cp /opt/vertica/config/share/nma_key.pem /opt/vertica/config/https_certs/dbadmin.key && "
-                f"  cp /opt/vertica/config/share/nma_cert.pem /opt/vertica/config/https_certs/rootca.pem; "
-                f"fi && "
-                f"chown -R dbadmin:verticadba /opt/vertica/config/https_certs && "
-                f"chmod 600 /opt/vertica/config/https_certs/*.key 2>/dev/null || true"
+                f"chown -R dbadmin:verticadba /opt/vertica/config/https_certs 2>/dev/null || true && "
+                f"chmod 600 /opt/vertica/config/https_certs/*.key 2>/dev/null || true && "
+                f"chmod 644 /opt/vertica/config/https_certs/*.pem /opt/vertica/config/https_certs/*.json 2>/dev/null || true"
             )
             self._ssh(ip, cert_setup_cmd, sudo=True, timeout=60)
 
@@ -908,8 +1021,8 @@ echo "Running as user: $(whoami), uid: $(id -u), groups: $(id -G)"
             print("\nERROR: Vertica RPM installation failed. Aborting.")
             return False
 
-        # Step 4: Generate TLS material via install_vertica on bootstrap and sync to nodes
-        if not self.run_install_vertica_for_certs():
+        # Step 4: Generate TLS material locally (no node-to-node SSH) and deploy to nodes
+        if not self.generate_tls_material_no_ssh():
             print("\nWARNING: TLS material generation had issues, continuing...")
 
         # Step 5: Start NMA services
