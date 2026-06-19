@@ -493,7 +493,7 @@ ssh -i /root/.ssh/id_rsa -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@{
         print("\nGenerating TLS material locally and deploying to all nodes...")
         print(f"  Nodes: {', '.join(self.instance_private_ips)}")
 
-        certs_dir = Path("./https_certs_gen")
+        certs_dir = Path("./https_certs_gen").resolve()
         certs_dir.mkdir(parents=True, exist_ok=True)
 
         # Build subjectAltName entries for all node private IPs, hostnames, and localhost
