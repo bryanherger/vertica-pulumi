@@ -54,6 +54,7 @@ def load_config() -> dict:
         "aws_secret_access_key": config.get_secret("aws_secret_access_key") or "",
         "iam_instance_profile": config.get("iam_instance_profile") or "",
         "connect_via_public_ip": config.get_bool("connect_via_public_ip") or False,
+        "run_db_create_inline": config.get_bool("run_db_create_inline") or False,
     }
     
     # Try YAML config file as fallback
@@ -75,8 +76,9 @@ def load_config() -> dict:
                 cfg.setdefault("eon_mode", vertica_cfg.get("mode", "").lower() == "eon" or bool(vertica_cfg.get("communal_storage")) or bool(eon_cfg.get("communal_storage_location")))
                 cfg.setdefault("region", compute_aws_cfg.get("region", aws_cfg.get("region", cfg["region"])))
                 cfg.setdefault("instance_type", compute_aws_cfg.get("instance_type", aws_cfg.get("instance_type", cfg["instance_type"])))
-                cfg["key_name"] = compute_aws_cfg.get("key_name") or aws_cfg.get("key_name") or cfg["key_name"]
-                cfg["connect_via_public_ip"] = compute_aws_cfg.get("connect_via_public_ip") or cfg["connect_via_public_ip"]
+                cfg["key_name"] = cfg["key_name"] or compute_aws_cfg.get("key_name") or aws_cfg.get("key_name")
+                cfg["connect_via_public_ip"] = cfg["connect_via_public_ip"] or compute_aws_cfg.get("connect_via_public_ip")
+                cfg["run_db_create_inline"] = cfg["run_db_create_inline"] or compute_aws_cfg.get("run_db_create_inline")
                 cfg.setdefault("communal_path", eon_cfg.get("communal_storage_location", cfg["communal_path"]))
                 cfg.setdefault("s3_auth_mode", compute_aws_cfg.get("s3_auth_mode", cfg["s3_auth_mode"]))
                 cfg.setdefault("iam_instance_profile", compute_aws_cfg.get("iam_instance_profile", cfg["iam_instance_profile"]))
@@ -402,8 +404,8 @@ try:
         triggers=[inst.id for inst in instances],
     )
     
-    # Create database command (only when an SSH key is configured)
-    if cfg.get("key_name"):
+    # Create database command (only when an SSH key is configured AND inline DB creation is enabled)
+    if cfg.get("key_name") and cfg.get("run_db_create_inline"):
         create_db_cmd = command.remote.Command(
             "create-database",
             connection=command.remote.ConnectionArgs(
@@ -431,8 +433,9 @@ echo "Database created successfully"
         
         pulumi.export("db_create_status", create_db_cmd.stdout)
     else:
-        pulumi.log.info("No key_name configured; skipping inline create-database remote command.")
-        pulumi.export("db_create_status", "skipped: no key_name configured")
+        reason = "no key_name configured" if not cfg.get("key_name") else "run_db_create_inline is not enabled"
+        pulumi.log.info(f"Skipping inline create-database remote command: {reason}. Run scripts/install_vertica_eon.py after the stack is ready.")
+        pulumi.export("db_create_status", f"skipped: {reason}")
     
 except ImportError:
     pulumi.log.warn("pulumi-command not installed. Database lifecycle commands not available.")
