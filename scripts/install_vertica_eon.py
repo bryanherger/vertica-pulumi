@@ -496,13 +496,28 @@ class VerticaEonInstaller:
         
         vcluster_cmd = " ".join(cmd_parts)
 
-        # Ensure we call the full-path binary in non-interactive SSH sessions
-        full_vcluster_cmd = f"PATH=$PATH:/opt/vertica/bin /opt/vertica/bin/{vcluster_cmd}"
+        # Vertica commands must run as the dbadmin OS user.
+        # Write the command to a script and execute it with su to avoid quoting hell.
+        script_content = f"""#!/bin/bash
+export PATH=$PATH:/opt/vertica/bin
+/opt/vertica/bin/{vcluster_cmd}
+"""
+        script_path = "/tmp/vcluster_create_db.sh"
+        with open(script_path, "w") as f:
+            f.write(script_content)
 
         print(f"\n  Executing vcluster command...")
-        print(f"  Command: {full_vcluster_cmd}")
+        print(f"  Command: /opt/vertica/bin/{vcluster_cmd}")
 
-        rc, out, err = self._ssh(primary_ip, full_vcluster_cmd, timeout=600)
+        # Upload script to primary node
+        rc, _, err = self._scp(script_path, f"{script_path}", primary_ip)
+        if rc != 0:
+            print(f"  ERROR: Failed to upload vcluster script: {err}")
+            return False
+
+        # Make executable and run as dbadmin
+        exec_cmd = f"chmod +x {script_path} && sudo su - dbadmin -c '{script_path}'"
+        rc, out, err = self._ssh(primary_ip, exec_cmd, timeout=600)
         
         print(f"\n  Output:\n{out}")
         if err:
