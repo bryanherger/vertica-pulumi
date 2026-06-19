@@ -535,6 +535,10 @@ class VerticaEonInstaller:
         if self.admin_password:
             cmd_parts.extend(["--password", self.admin_password])
         
+        # Add license file path
+        license_dest = "/opt/vertica/config/licensing/license.xml"
+        cmd_parts.extend(["--license", license_dest])
+
         # Add AWS config parameters
         # IAM role (default): no AWS auth flags; vcluster uses instance metadata service.
         # Access keys: pass AWSAuth via --config-param.
