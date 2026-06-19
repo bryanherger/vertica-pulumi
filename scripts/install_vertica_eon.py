@@ -556,8 +556,8 @@ class VerticaEonInstaller:
         # Add certificate files if generated
         if self.generate_certs:
             cmd_parts.extend([
-                "--cert-file", "/opt/vertica/config/https_certs/dbadmin.pem",
-                "--key-file", "/opt/vertica/config/https_certs/dbadmin.key"
+                "--cert-file", "/opt/vertica/config/https_certs/vertica_https.pem",
+                "--key-file", "/opt/vertica/config/https_certs/vertica_https.key"
             ])
         
         # Skip package install (we already installed)

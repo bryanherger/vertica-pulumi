@@ -161,10 +161,11 @@ class NMACertificateGenerator:
         """
         print(f"\nDeploying certificates to {len(self.hosts)} nodes...")
 
-        # Vertica NMA looks in /opt/vertica/config/https_certs by default
+        # Vertica NMA looks in /opt/vertica/config/https_certs by default.
+        # The default filenames are vertica_https.pem, vertica_https.key, rootca.pem.
         cert_dir = "/opt/vertica/config/https_certs"
-        cert_dest = f"{cert_dir}/dbadmin.pem"
-        key_dest = f"{cert_dir}/dbadmin.key"
+        cert_dest = f"{cert_dir}/vertica_https.pem"
+        key_dest = f"{cert_dir}/vertica_https.key"
         ca_dest = f"{cert_dir}/rootca.pem"
 
         all_success = True
