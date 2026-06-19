@@ -238,6 +238,18 @@ class VerticaEonInstaller:
 
         return all_success
 
+    def _ensure_vertica_user(self, ip: str) -> bool:
+        """Ensure the verticadba group and dbadmin user exist on the node."""
+        cmd = (
+            "getent group verticadba >/dev/null || sudo groupadd -g 10000 verticadba; "
+            "getent passwd dbadmin >/dev/null || sudo useradd -u 10000 -g verticadba -m -s /bin/bash dbadmin"
+        )
+        rc, out, err = self._ssh(ip, cmd, timeout=30)
+        if rc != 0:
+            print(f"    WARNING: Could not ensure dbadmin/verticadba: {err}")
+            return False
+        return True
+
     def install_vertica(self, rpm_path: str, license_path: str = "") -> bool:
         """Install Vertica RPM on all nodes"""
         rpm_name = os.path.basename(rpm_path)
@@ -249,13 +261,39 @@ class VerticaEonInstaller:
         for ip in self.instance_ips:
             print(f"\n  Installing on {ip}...")
 
-            # Install RPM
-            install_cmd = f"rpm -ivh /tmp/{rpm_name} || rpm -Uvh /tmp/{rpm_name}"
+            # Install prerequisites
+            print("    Installing prerequisites (dialog, psmisc, which, net-tools)...")
+            prereq_cmd = (
+                "(command -v dnf >/dev/null 2>&1 && sudo dnf install -y dialog psmisc which net-tools) || "
+                "(command -v yum >/dev/null 2>&1 && sudo yum install -y dialog psmisc which net-tools) || "
+                "(command -v apt-get >/dev/null 2>&1 && sudo apt-get install -y dialog psmisc net-tools) || "
+                "echo 'WARNING: no supported package manager found'"
+            )
+            self._ssh(ip, prereq_cmd, sudo=True, timeout=180)
+
+            # Try package-manager based install first (resolves dependencies)
+            install_cmd = (
+                f"(command -v dnf >/dev/null 2>&1 && sudo dnf localinstall -y /tmp/{rpm_name}) || "
+                f"(command -v yum >/dev/null 2>&1 && sudo yum localinstall -y /tmp/{rpm_name}) || "
+                f"(sudo rpm -ivh --nodeps /tmp/{rpm_name} || sudo rpm -Uvh --nodeps /tmp/{rpm_name})"
+            )
             rc, out, err = self._ssh(ip, install_cmd, sudo=True, timeout=300)
             if rc != 0:
-                print(f"    WARNING: RPM install may have issues: {err}")
+                print(f"    ERROR: RPM install failed: {err}")
+                print("    Attempting fallback install with --nodeps...")
+                fallback_cmd = f"sudo rpm -ivh --nodeps /tmp/{rpm_name} || sudo rpm -Uvh --nodeps /tmp/{rpm_name}"
+                rc, out, err = self._ssh(ip, fallback_cmd, sudo=True, timeout=300)
+                if rc != 0:
+                    print(f"    ERROR: Fallback RPM install also failed: {err}")
+                    all_success = False
+                    continue
+                else:
+                    print(f"    RPM installed successfully with --nodeps")
             else:
                 print(f"    RPM installed successfully")
+
+            # Ensure dbadmin user exists (RPM normally creates it, but fallback may not)
+            self._ensure_vertica_user(ip)
 
             # Copy license if provided
             if license_name:
@@ -441,11 +479,14 @@ class VerticaEonInstaller:
         cmd_parts.append("--skip-package-install")
         
         vcluster_cmd = " ".join(cmd_parts)
-        
+
+        # Ensure we call the full-path binary in non-interactive SSH sessions
+        full_vcluster_cmd = f"PATH=$PATH:/opt/vertica/bin /opt/vertica/bin/{vcluster_cmd}"
+
         print(f"\n  Executing vcluster command...")
-        print(f"  Command: {vcluster_cmd}")
-        
-        rc, out, err = self._ssh(primary_ip, vcluster_cmd, timeout=600)
+        print(f"  Command: {full_vcluster_cmd}")
+
+        rc, out, err = self._ssh(primary_ip, full_vcluster_cmd, timeout=600)
         
         print(f"\n  Output:\n{out}")
         if err:
@@ -549,7 +590,8 @@ class VerticaEonInstaller:
 
         # Step 3: Install Vertica RPM
         if not self.install_vertica(rpm_path, license_path):
-            print("\nWARNING: Installation had issues, continuing...")
+            print("\nERROR: Vertica RPM installation failed. Aborting.")
+            return False
 
         # Step 4: Generate and deploy certificates
         if not self.generate_and_deploy_certs():

@@ -151,7 +151,11 @@ class NMACertificateGenerator:
                     "-o", "ConnectTimeout=30",
                     "-o", "BatchMode=yes",
                     f"{self.ssh_user}@{host}",
-                    f"sudo mkdir -p {cert_dir} && sudo chown dbadmin:verticadba {cert_dir} && sudo chmod 755 {cert_dir}"
+                    f"(getent group verticadba >/dev/null || sudo groupadd -g 10000 verticadba) && "
+                    f"(getent passwd dbadmin >/dev/null || sudo useradd -u 10000 -g verticadba -m -s /bin/bash dbadmin) && "
+                    f"sudo mkdir -p {cert_dir} && "
+                    f"sudo chown dbadmin:verticadba {cert_dir} && "
+                    f"sudo chmod 755 {cert_dir}"
                 ]
                 
                 result = subprocess.run(mkdir_cmd, capture_output=True, text=True, timeout=60)
