@@ -96,6 +96,7 @@ class VerticaEonInstaller:
 
     def _get_instance_ips(self) -> List[str]:
         """Get instance IPs from Pulumi outputs or config"""
+        # Try the aggregated instance_ips output first
         try:
             result = subprocess.run(
                 ["pulumi", "stack", "output", "instance_ips", "--json"],
@@ -106,6 +107,27 @@ class VerticaEonInstaller:
                 return ips
         except (subprocess.CalledProcessError, json.JSONDecodeError):
             pass
+
+        # Fallback: try individual node_*_public_ip / node_*_private_ip outputs
+        for suffix in ("public_ip", "private_ip"):
+            ips = []
+            node = 1
+            while True:
+                try:
+                    result = subprocess.run(
+                        ["pulumi", "stack", "output", f"node_{node}_{suffix}", "--json"],
+                        capture_output=True, text=True, check=True
+                    )
+                    ip = json.loads(result.stdout)
+                    if ip:
+                        ips.append(ip)
+                        node += 1
+                    else:
+                        break
+                except (subprocess.CalledProcessError, json.JSONDecodeError):
+                    break
+            if ips:
+                return ips
 
         # Fallback: try to read from config (for bare metal)
         hosts = self.compute_config.get('baremetal', {}).get('hosts', [])
