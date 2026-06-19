@@ -29,6 +29,7 @@ Prerequisites:
 """
 
 import argparse
+import base64
 import json
 import os
 import subprocess
@@ -352,6 +353,9 @@ class VerticaEonInstaller:
             # Ensure dbadmin user exists (RPM normally creates it, but fallback may not)
             self._ensure_vertica_user(ip)
 
+            # Store RPM path for later use by install_vertica TLS generation
+            self.rpm_path = rpm_path
+
             # Copy license if provided
             if license_name:
                 license_cmd = (
@@ -392,10 +396,88 @@ class VerticaEonInstaller:
 
         return all_success
 
+    def _setup_root_ssh_between_nodes(self) -> bool:
+        """
+        Configure passwordless root SSH between all cluster nodes so that
+        install_vertica can run in multi-node mode and generate per-node certs.
+        """
+        if not self.instance_ips:
+            return False
+
+        print("\n  Setting up root SSH between cluster nodes...")
+
+        with open(self.ssh_key_path, 'r') as f:
+            key_material = f.read().strip()
+        pub_key_material = None
+        pub_key_path = self.ssh_key_path + '.pub'
+        if os.path.exists(pub_key_path):
+            with open(pub_key_path, 'r') as f:
+                pub_key_material = f.read().strip()
+        else:
+            # Derive public key from private key
+            result = subprocess.run(
+                ["ssh-keygen", "-y", "-f", self.ssh_key_path],
+                capture_output=True, text=True
+            )
+            if result.returncode == 0:
+                pub_key_material = result.stdout.strip()
+            else:
+                print(f"    ERROR: Could not derive public key: {result.stderr}")
+                return False
+
+        all_ok = True
+        for ip in self.instance_ips:
+            print(f"    Configuring {ip} for root SSH...")
+
+            # Build the root-SSH setup script locally and run it via base64 to avoid quoting hell.
+            setup_script = f"""#!/bin/bash
+set -e
+mkdir -p /root/.ssh
+chmod 700 /root/.ssh
+cat > /root/.ssh/id_rsa <<'KEYEOF'
+{key_material}
+KEYEOF
+chmod 600 /root/.ssh/id_rsa
+if [ ! -f /root/.ssh/authorized_keys ] || ! grep -qF '{pub_key_material}' /root/.ssh/authorized_keys; then
+    echo '{pub_key_material}' >> /root/.ssh/authorized_keys
+fi
+chmod 600 /root/.ssh/authorized_keys
+if [ -f /etc/ssh/sshd_config ]; then
+    sed -i 's/^#*\\s*PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+    sed -i 's/^#*\\s*PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+fi
+systemctl reload sshd || service sshd reload || true
+"""
+            encoded = base64.b64encode(setup_script.encode('utf-8')).decode('utf-8')
+            cmd = f"echo '{encoded}' | base64 -d | sudo bash"
+            rc, out, err = self._ssh(ip, cmd, sudo=False, timeout=60)
+            if rc != 0:
+                print(f"      FAILED: {err}")
+                all_ok = False
+            else:
+                # Quick connectivity test from each node to every other node
+                for other_ip in self.instance_private_ips:
+                    if other_ip == self.instance_private_ips[self.instance_ips.index(ip)]:
+                        continue
+                    test_script = f"""#!/bin/bash
+ssh -i /root/.ssh/id_rsa -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@{other_ip} 'echo ROOT_SSH_OK' 2>&1
+"""
+                    test_encoded = base64.b64encode(test_script.encode('utf-8')).decode('utf-8')
+                    test_cmd = f"echo '{test_encoded}' | base64 -d | sudo bash"
+                    rc2, out2, err2 = self._ssh(ip, test_cmd, sudo=False, timeout=30)
+                    if rc2 != 0 or 'ROOT_SSH_OK' not in out2:
+                        print(f"      WARNING: root SSH from {ip} to {other_ip} failed: {err2.strip() or out2.strip()}")
+                        all_ok = False
+                    else:
+                        print(f"      OK: root SSH {ip} -> {other_ip}")
+
+        return all_ok
+
     def run_install_vertica_for_certs(self) -> bool:
         """
-        Run Vertica's install_vertica script on the bootstrap node to generate
-        the full set of NMA/HTTPS TLS material, then copy it to all nodes.
+        Run Vertica's install_vertica script on the bootstrap node in multi-node
+        mode to generate the full set of NMA/HTTPS TLS material for every node,
+        then copy it to all nodes.
 
         This is required because the vcluster HTTPS service expects the same
         CA-signed bootstrap cert/key/CA files produced by install_vertica.
@@ -411,55 +493,58 @@ class VerticaEonInstaller:
         bootstrap_public = self.instance_ips[0]
         bootstrap_private = self.instance_private_ips[0]
         license_dest = "/opt/vertica/config/licensing/license.xml"
+        rpm_name = os.path.basename(self.rpm_path) if getattr(self, 'rpm_path', '') else "vertica.rpm"
 
         print("\nGenerating TLS material via Vertica install_vertica...")
         print(f"  Bootstrap node: {bootstrap_public} ({bootstrap_private})")
 
-        # Inspect install_vertica options so we can use whatever the version supports
+        # Set up root SSH between nodes so install_vertica can run in multi-node mode.
+        if not self._setup_root_ssh_between_nodes():
+            print("  WARNING: Root SSH setup had issues; continuing anyway...")
+
+        # Inspect install_vertica options so we can use whatever the version supports.
         help_cmd = "bash -c '/opt/vertica/sbin/install_vertica --help 2>&1 || true'"
         rc, help_out, _ = self._ssh(bootstrap_public, help_cmd, sudo=False, timeout=30)
 
         def flag(name: str) -> str:
-            if f"--{name.replace('_', '-')}" in help_out:
-                return f"--{name.replace('_', '-')}"
-            if f"--{name}" in help_out:
-                return f"--{name}"
+            long_dash = name.replace('_', '-')
+            for opt in (f"--{long_dash}", f"--{name}", f"--{name.replace('-', '')}"):
+                if opt in help_out:
+                    return opt
             return ""
 
-        no_sys_cfg = flag("no_system_configuration") or flag("no_system_config") or "--no-system-configuration"
-        no_pkg_chk = flag("no_package_check") or ""
-        no_ssh_key = flag("no_ssh_key_install") or "--no-ssh-key-install"
+        no_rpm_copy = flag("no_rpm_copy") or "--no-rpm-copy"
         failure_thr = flag("failure_threshold") or "--failure-threshold"
-        not_strict = flag("not_strict") or "--not-strict"
+        ssh_identity = flag("ssh_identity") or "--ssh-identity"
+        # install_vertica uses -L for license, not --license, but accept either
+        license_opt = "-L" if "-L " in help_out or "-L, --license" in help_out or "--license" not in help_out else "--license"
 
-        # Build the install_vertica command.  We only operate on the bootstrap node
-        # because multi-node install requires dbadmin SSH between nodes, which we
-        # do not have.  The goal is just to create the CA/bootstrap TLS files.
+        # Build the install_vertica command.  Pass all hosts so it creates per-node
+        # certificates.  RPM is already on each node at /tmp/<rpm_name>.
+        hosts_arg = ",".join(self.instance_private_ips)
         install_cmd_parts = [
             "sudo",
             "/opt/vertica/sbin/install_vertica",
-            "--hosts", bootstrap_private,
+            "--hosts", hosts_arg,
             "--accept-eula",
-            "--license", license_dest,
+            license_opt, license_dest,
             "--dba-user-password-disabled",
-            no_sys_cfg,
-            no_ssh_key,
+            no_rpm_copy,
+            "--rpm-path", f"/tmp/{rpm_name}",
             failure_thr, "NONE",
-            not_strict,
+            ssh_identity, "/root/.ssh/id_rsa",
         ]
-        if no_pkg_chk:
-            install_cmd_parts.append(no_pkg_chk)
 
         install_cmd = " ".join(install_cmd_parts)
         print(f"  Running: {install_cmd}")
 
-        rc, out, err = self._ssh(bootstrap_public, install_cmd, sudo=False, timeout=300)
+        rc, out, err = self._ssh(bootstrap_public, install_cmd, sudo=False, timeout=600)
         if rc != 0:
             print(f"  WARNING: install_vertica returned {rc}: {err}")
             print(f"  Output: {out.strip()}")
             print("  Continuing anyway; TLS files may still have been generated...")
 
-        # Verify the key TLS files exist
+        # Verify the key TLS files exist on the bootstrap node
         verify_cmd = (
             "ls -la /opt/vertica/config/https_certs/ 2>&1 | "
             "grep -E 'vertica_https.pem|vertica_https.key|rootca.pem'"
@@ -472,7 +557,8 @@ class VerticaEonInstaller:
 
         print("  Bootstrap TLS files generated successfully")
 
-        # Package the https_certs directory on the bootstrap node and copy it to others
+        # install_vertica should have distributed certs in multi-node mode, but
+        # make sure every node has the material by copying from bootstrap anyway.
         if len(self.instance_ips) > 1:
             print("\nCopying TLS material from bootstrap to remaining nodes...")
             tar_remote = "/tmp/https_certs.tar.gz"
@@ -489,7 +575,6 @@ class VerticaEonInstaller:
             all_copied = True
             for ip in self.instance_ips[1:]:
                 print(f"  Copying to {ip}...")
-                # scp the tarball from bootstrap to this node via the local runner
                 scp_from = f"{self.ssh_user}@{bootstrap_public}:{tar_remote}"
                 scp_to = f"{self.ssh_user}@{ip}:/tmp/https_certs.tar.gz"
                 scp_cmd = [
@@ -510,7 +595,6 @@ class VerticaEonInstaller:
                     all_copied = False
                     continue
 
-                # Extract and set ownership/permissions
                 extract_cmd = (
                     f"sudo rm -rf /opt/vertica/config/https_certs && "
                     f"sudo mkdir -p /opt/vertica/config/https_certs && "
@@ -589,32 +673,32 @@ class VerticaEonInstaller:
         if not self.instance_ips:
             print("ERROR: No instance IPs available")
             return False
-        
+
         if not self.instance_private_ips:
             print("ERROR: No instance private IPs available")
             return False
-        
+
         if not self.communal_storage:
             print("ERROR: Communal storage location not configured")
             return False
-        
+
         primary_ip = self.instance_ips[0]
         hosts = ",".join(self.instance_private_ips)
-        
+
         action = "Create" if self.db_init == "create" else "Revive"
         cmd_action = "create_db" if self.db_init == "create" else "revive_db"
-        
+
         print(f"\n{action} Eon Mode database '{self.db_name}'...")
         print(f"  Primary node: {primary_ip}")
         print(f"  Hosts: {hosts}")
         print(f"  Communal storage: {self.communal_storage}")
         print(f"  Mode: {self.db_init.upper()}")
-        
+
         if self.db_init == "create":
             print(f"  Shard count: {self.shard_count}")
         print(f"  Depot path: {self.depot_path}")
         print(f"  Depot size: {self.depot_size}")
-        
+
         # Build vcluster command
         cmd_parts = [
             "vcluster",
@@ -627,15 +711,15 @@ class VerticaEonInstaller:
             "--depot-path", self.depot_path,
             "--depot-size", self.depot_size,
         ]
-        
+
         # Only add shard-count for create (not revive - existing count is used)
         if self.db_init == "create":
             cmd_parts.extend(["--shard-count", str(self.shard_count)])
-        
+
         # Add password if configured (vcluster uses --password, not --username)
         if self.admin_password:
             cmd_parts.extend(["--password", self.admin_password])
-        
+
         # Add license file path
         license_dest = "/opt/vertica/config/licensing/license.xml"
         cmd_parts.extend(["--license", license_dest])
@@ -652,25 +736,38 @@ class VerticaEonInstaller:
         elif self.s3_auth_mode == "env_vars":
             cmd_parts.append("--get-aws-credentials-from-env-vars")
         # For "iam_role" (or unset), rely on instance profile / IMDS and pass nothing.
-        
+
         cmd_parts.extend([
             "--config-param",
             f"AWSRegion={self.aws_region},AWSEnableHttps={1 if self.aws_enable_https else 0}"
         ])
-        
-        # Add certificate files if generated
+
+        # Add certificate files only if no install_vertica-generated bootstrap certs exist.
+        # When install_vertica generates the full TLS material, vcluster defaults to
+        # /opt/vertica/config/https_certs/{vertica_https,rootca}.{pem,key}, which is
+        # exactly what we want.  Passing explicit --cert-file/--key-file overrides the
+        # defaults and can fail if the filenames differ.
         if self.generate_certs:
-            cmd_parts.extend([
-                "--cert-file", "/opt/vertica/config/https_certs/vertica_https.pem",
-                "--key-file", "/opt/vertica/config/https_certs/vertica_https.key"
-            ])
-        
+            bootstrap_cert_exists_cmd = (
+                "test -f /opt/vertica/config/https_certs/vertica_https.pem "
+                "&& echo GENERATED || echo MISSING"
+            )
+            rc, out, _ = self._ssh(primary_ip, bootstrap_cert_exists_cmd, sudo=False, timeout=30)
+            if rc != 0 or "GENERATED" not in out:
+                print("  WARNING: install_vertica bootstrap cert not found; falling back to generated cert file args")
+                cmd_parts.extend([
+                    "--cert-file", "/opt/vertica/config/https_certs/vertica_https.pem",
+                    "--key-file", "/opt/vertica/config/https_certs/vertica_https.key"
+                ])
+            else:
+                print("  Using install_vertica-generated bootstrap certs")
+
         # Skip package install (we already installed)
         cmd_parts.append("--skip-package-install")
-        
+
         # Force removal of pre-existing database directories if they exist
         cmd_parts.append("--force-removal-at-creation")
-        
+
         vcluster_cmd = " ".join(cmd_parts)
 
         # Build a redacted command for display only
@@ -679,6 +776,10 @@ class VerticaEonInstaller:
 
         # Vertica commands must run as the dbadmin OS user.
         # Write the command to a script and execute it with su to avoid quoting hell.
+        # When install_vertica generates the TLS material, vcluster can use the
+        # default bootstrap cert locations.  Passing explicit --cert-file / --key-file
+        # overrides those defaults, so we omit them here and let vcluster pick the
+        # standard names (vertica_https.pem/key in /opt/vertica/config/https_certs).
         script_content = f"""#!/bin/bash
 set -e
 export PATH=$PATH:/opt/vertica/bin
@@ -701,14 +802,14 @@ echo "Running as user: $(whoami), uid: $(id -u), groups: $(id -G)"
         # Make executable and run as dbadmin
         exec_cmd = f"chmod +x {script_path} && sudo su - dbadmin -c '{script_path}'"
         rc, out, err = self._ssh(primary_ip, exec_cmd, timeout=600)
-        
+
         print(f"\n  Output:\n{out}")
         if err:
             print(f"  Errors:\n{err}")
-        
+
         if rc == 0:
             print(f"\n  SUCCESS: Database '{self.db_name}' {self.db_init}d successfully")
-            
+
             # For CREATE mode, sync catalog to ensure data is persisted to communal storage
             if self.db_init == "create":
                 print("\n  Syncing catalog to communal storage...")
@@ -723,7 +824,7 @@ echo "Running as user: $(whoami), uid: $(id -u), groups: $(id -G)"
                 else:
                     print(f"  WARNING: Catalog sync may have issues")
                     print(f"  Output: {out_sync}")
-            
+
             return True
         else:
             print(f"\n  FAILED: Database {self.db_init} failed with exit code {rc}")
