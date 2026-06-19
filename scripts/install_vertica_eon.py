@@ -307,12 +307,12 @@ class VerticaEonInstaller:
             # Copy license if provided
             if license_name:
                 license_cmd = (
-                    f"mkdir -p /opt/vertica/config/licensing && "
+                    f"sudo bash -c 'mkdir -p /opt/vertica/config/licensing && "
                     f"cp /tmp/{license_name} /opt/vertica/config/licensing/license.xml && "
                     f"chown -R dbadmin:verticadba /opt/vertica/config/licensing && "
-                    f"chmod 644 /opt/vertica/config/licensing/license.xml"
+                    f"chmod 644 /opt/vertica/config/licensing/license.xml'"
                 )
-                rc, out, err = self._ssh(ip, license_cmd, sudo=True, timeout=60)
+                rc, out, err = self._ssh(ip, license_cmd, sudo=False, timeout=60)
                 if rc != 0:
                     print(f"    WARNING: License install failed: {err}")
                 else:
@@ -320,13 +320,13 @@ class VerticaEonInstaller:
 
             # Fix permissions
             perm_cmd = (
-                f"chown -R dbadmin:verticadba /opt/vertica/config 2>/dev/null; "
+                f"sudo bash -c 'chown -R dbadmin:verticadba /opt/vertica/config 2>/dev/null; "
                 f"chmod 755 /opt/vertica/config 2>/dev/null; "
                 f"mkdir -p {self.depot_path} && "
                 f"chown dbadmin:verticadba {self.depot_path} && "
-                f"chmod 755 {self.depot_path}"
+                f"chmod 755 {self.depot_path}'"
             )
-            rc, out, err = self._ssh(ip, perm_cmd, sudo=True, timeout=60)
+            rc, out, err = self._ssh(ip, perm_cmd, sudo=False, timeout=60)
             if rc != 0:
                 print(f"    WARNING: Permission setup failed: {err}")
             else:
@@ -469,21 +469,20 @@ class VerticaEonInstaller:
             cmd_parts.extend(["--password", self.admin_password])
         
         # Add AWS config parameters
-        config_params = []
+        # --get-aws-credentials-from-env-vars is a standalone flag for IAM instance profiles.
+        # Region/HTTPS use --config-param key=value format.
         if self.aws_access_key and self.aws_secret_key:
-            config_params.append(f"awsauth={self.aws_access_key}:{self.aws_secret_key}")
+            cmd_parts.extend([
+                "--config-param",
+                f"AWSAuth={self.aws_access_key}:{self.aws_secret_key}"
+            ])
         else:
-            # Use instance credentials
-            config_params.append("get-aws-credentials-from-env-vars")
+            cmd_parts.append("--get-aws-credentials-from-env-vars")
         
-        config_params.append(f"awsregion={self.aws_region}")
-        config_params.append(f"awsenablehttps={1 if self.aws_enable_https else 0}")
-        
-        if self.s3_endpoint:
-            config_params.append(f"awsendpoint={self.s3_endpoint}")
-        
-        if config_params:
-            cmd_parts.extend(["--config-param", ",".join(config_params)])
+        cmd_parts.extend([
+            "--config-param",
+            f"AWSRegion={self.aws_region},AWSEneableHttps={1 if self.aws_enable_https else 0}"
+        ])
         
         # Add certificate files if generated
         if self.generate_certs:
