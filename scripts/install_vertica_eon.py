@@ -554,7 +554,7 @@ class VerticaEonInstaller:
         
         cmd_parts.extend([
             "--config-param",
-            f"AWSRegion={self.aws_region},AWSEneableHttps={1 if self.aws_enable_https else 0}"
+            f"AWSRegion={self.aws_region},AWSEnableHttps={1 if self.aws_enable_https else 0}"
         ])
         
         # Add certificate files if generated
