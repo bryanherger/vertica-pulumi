@@ -392,42 +392,143 @@ class VerticaEonInstaller:
 
         return all_success
 
-    def generate_and_deploy_certs(self) -> bool:
-        """Generate and deploy NMA certificates to all nodes"""
+    def run_install_vertica_for_certs(self) -> bool:
+        """
+        Run Vertica's install_vertica script on the bootstrap node to generate
+        the full set of NMA/HTTPS TLS material, then copy it to all nodes.
+
+        This is required because the vcluster HTTPS service expects the same
+        CA-signed bootstrap cert/key/CA files produced by install_vertica.
+        """
         if not self.generate_certs:
             print("Certificate generation disabled in config")
             return True
 
-        print("\nGenerating and deploying NMA certificates...")
+        if not self.instance_ips or not self.instance_private_ips:
+            print("ERROR: No instance IPs available for cert generation")
+            return False
 
-        try:
-            # Import and use the certificate generator
-            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-            from generate_nma_certs import NMACertificateGenerator
+        bootstrap_public = self.instance_ips[0]
+        bootstrap_private = self.instance_private_ips[0]
+        license_dest = "/opt/vertica/config/licensing/license.xml"
 
-            cert_config = {
-                'country': self.security_config.get('cert_country', 'US'),
-                'organization': self.security_config.get('cert_org', 'Vertica'),
-                'common_name': self.security_config.get('cert_cn', 'vertica-nma'),
-                'validity_days': self.security_config.get('cert_validity_days', 365)
-            }
+        print("\nGenerating TLS material via Vertica install_vertica...")
+        print(f"  Bootstrap node: {bootstrap_public} ({bootstrap_private})")
 
-            generator = NMACertificateGenerator(
-                hosts=self.instance_ips,
-                ssh_key_path=self.ssh_key_path,
-                ssh_user=self.ssh_user,
-                output_dir="./certs",
-                cert_config=cert_config
+        # Inspect install_vertica options so we can use whatever the version supports
+        help_cmd = "bash -c '/opt/vertica/sbin/install_vertica --help 2>&1 || true'"
+        rc, help_out, _ = self._ssh(bootstrap_public, help_cmd, sudo=False, timeout=30)
+
+        def flag(name: str) -> str:
+            if f"--{name.replace('_', '-')}" in help_out:
+                return f"--{name.replace('_', '-')}"
+            if f"--{name}" in help_out:
+                return f"--{name}"
+            return ""
+
+        no_sys_cfg = flag("no_system_configuration") or flag("no_system_config") or "--no-system-configuration"
+        no_pkg_chk = flag("no_package_check") or ""
+        no_ssh_key = flag("no_ssh_key_install") or "--no-ssh-key-install"
+        failure_thr = flag("failure_threshold") or "--failure-threshold"
+        not_strict = flag("not_strict") or "--not-strict"
+
+        # Build the install_vertica command.  We only operate on the bootstrap node
+        # because multi-node install requires dbadmin SSH between nodes, which we
+        # do not have.  The goal is just to create the CA/bootstrap TLS files.
+        install_cmd_parts = [
+            "sudo",
+            "/opt/vertica/sbin/install_vertica",
+            "--hosts", bootstrap_private,
+            "--accept-eula",
+            "--license", license_dest,
+            "--dba-user-password-disabled",
+            no_sys_cfg,
+            no_ssh_key,
+            failure_thr, "NONE",
+            not_strict,
+        ]
+        if no_pkg_chk:
+            install_cmd_parts.append(no_pkg_chk)
+
+        install_cmd = " ".join(install_cmd_parts)
+        print(f"  Running: {install_cmd}")
+
+        rc, out, err = self._ssh(bootstrap_public, install_cmd, sudo=False, timeout=300)
+        if rc != 0:
+            print(f"  WARNING: install_vertica returned {rc}: {err}")
+            print(f"  Output: {out.strip()}")
+            print("  Continuing anyway; TLS files may still have been generated...")
+
+        # Verify the key TLS files exist
+        verify_cmd = (
+            "ls -la /opt/vertica/config/https_certs/ 2>&1 | "
+            "grep -E 'vertica_https.pem|vertica_https.key|rootca.pem'"
+        )
+        rc, out, _ = self._ssh(bootstrap_public, verify_cmd, sudo=False, timeout=30)
+        if rc != 0 or not all(name in out for name in ("vertica_https.pem", "vertica_https.key", "rootca.pem")):
+            print("  ERROR: install_vertica did not produce the expected TLS files")
+            print(f"  Listing:\n{out}")
+            return False
+
+        print("  Bootstrap TLS files generated successfully")
+
+        # Package the https_certs directory on the bootstrap node and copy it to others
+        if len(self.instance_ips) > 1:
+            print("\nCopying TLS material from bootstrap to remaining nodes...")
+            tar_remote = "/tmp/https_certs.tar.gz"
+            tar_cmd = (
+                f"sudo tar -czf {tar_remote} -C /opt/vertica/config https_certs && "
+                f"sudo chown {self.ssh_user}:{self.ssh_user} {tar_remote} && "
+                f"chmod 644 {tar_remote}"
             )
+            rc, _, err = self._ssh(bootstrap_public, tar_cmd, sudo=False, timeout=60)
+            if rc != 0:
+                print(f"  ERROR: Failed to package TLS files: {err}")
+                return False
 
-            return generator.run()
+            all_copied = True
+            for ip in self.instance_ips[1:]:
+                print(f"  Copying to {ip}...")
+                # scp the tarball from bootstrap to this node via the local runner
+                scp_from = f"{self.ssh_user}@{bootstrap_public}:{tar_remote}"
+                scp_to = f"{self.ssh_user}@{ip}:/tmp/https_certs.tar.gz"
+                scp_cmd = [
+                    "scp",
+                    "-i", self.ssh_key_path,
+                    "-o", "StrictHostKeyChecking=no",
+                    "-o", "BatchMode=yes",
+                    scp_from, scp_to,
+                ]
+                try:
+                    result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=180)
+                    if result.returncode != 0:
+                        print(f"    FAILED to copy tarball: {result.stderr}")
+                        all_copied = False
+                        continue
+                except Exception as e:
+                    print(f"    FAILED to copy tarball: {e}")
+                    all_copied = False
+                    continue
 
-        except ImportError as e:
-            print(f"ERROR: Could not import certificate generator: {e}")
-            return False
-        except Exception as e:
-            print(f"ERROR: Certificate generation failed: {e}")
-            return False
+                # Extract and set ownership/permissions
+                extract_cmd = (
+                    f"sudo rm -rf /opt/vertica/config/https_certs && "
+                    f"sudo mkdir -p /opt/vertica/config/https_certs && "
+                    f"sudo tar -xzf /tmp/https_certs.tar.gz -C /opt/vertica/config && "
+                    f"sudo chown -R dbadmin:verticadba /opt/vertica/config/https_certs && "
+                    f"sudo find /opt/vertica/config/https_certs -type f -name '*.key' -exec chmod 600 {{}} \\; && "
+                    f"sudo find /opt/vertica/config/https_certs -type f ! -name '*.key' -exec chmod 644 {{}} \\;"
+                )
+                rc, _, err = self._ssh(ip, extract_cmd, sudo=False, timeout=60)
+                if rc != 0:
+                    print(f"    FAILED to extract TLS files: {err}")
+                    all_copied = False
+                else:
+                    print(f"    SUCCESS")
+
+            return all_copied
+
+        return True
 
     def start_nma_services(self) -> bool:
         """Start NMA services on all nodes"""
@@ -706,9 +807,9 @@ echo "Running as user: $(whoami), uid: $(id -u), groups: $(id -G)"
             print("\nERROR: Vertica RPM installation failed. Aborting.")
             return False
 
-        # Step 4: Generate and deploy certificates
-        if not self.generate_and_deploy_certs():
-            print("\nWARNING: Certificate deployment had issues, continuing...")
+        # Step 4: Generate TLS material via install_vertica on bootstrap and sync to nodes
+        if not self.run_install_vertica_for_certs():
+            print("\nWARNING: TLS material generation had issues, continuing...")
 
         # Step 5: Start NMA services
         if not self.start_nma_services():
