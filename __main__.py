@@ -30,67 +30,129 @@ from modules.cluster_management import ClusterLifecycleManager
 # ------------------------------------------------------------------
 
 def load_config() -> dict:
-    """Load configuration from Pulumi config or YAML file."""
-    # Try Pulumi config first
+    """Load configuration from YAML file, overridden by Pulumi config."""
     config = pulumi.Config()
-    
-    # Determine YAML config file path (Pulumi config overrides default)
+
+    # Determine YAML config file path (Pulumi config or env var overrides default)
     config_file = config.get("config_file") or os.environ.get("VERTICA_CONFIG_FILE") or "config/config.yaml"
     pulumi.log.info(f"Loading Vertica config from: {config_file}")
-    
-    cfg = {
-        "cluster_name": config.get("cluster_name") or "vertica-cluster",
-        "node_count": int(config.get("node_count") or 3),
-        "instance_type": config.get("instance_type") or "r6i.2xlarge",
-        "region": config.get("region") or "us-east-1",
-        "db_name": config.get("db_name") or "analytics",
-        "db_user": config.get("db_user") or "dbadmin",
-        "db_password": config.get_secret("db_password") or "",
-        "eon_mode": config.get_bool("eon_mode") or False,
-        "shard_count": int(config.get("shard_count") or 6),
-        "data_path": config.get("data_path") or "/data/vertica",
-        "catalog_path": config.get("catalog_path") or "/data/catalog",
-        "communal_path": config.get("communal_path") or "",
-        "key_name": config.get("key_name") or "",
-        "action": config.get("action") or "create",  # create|revive|start|stop|destroy
-        "s3_auth_mode": config.get("s3_auth_mode") or "iam_role",  # iam_role | access_keys
-        "aws_access_key_id": config.get("aws_access_key_id") or "",
-        "aws_secret_access_key": config.get_secret("aws_secret_access_key") or "",
-        "iam_instance_profile": config.get("iam_instance_profile") or "",
-        "connect_via_public_ip": config.get_bool("connect_via_public_ip") or False,
-        "run_db_create_inline": config.get_bool("run_db_create_inline") or False,
-        "config_file": config_file,
-    }
-    
-    # Try YAML config file as fallback
+
+    # Start with YAML config as the base
+    cfg: dict = {}
     config_path = Path(config_file)
     if config_path.exists():
         with open(config_path) as f:
-            yaml_cfg = yaml.safe_load(f)
-            if yaml_cfg:
-                vertica_cfg = yaml_cfg.get("vertica", {})
-                aws_cfg = yaml_cfg.get("aws", {})
-                compute_cfg = yaml_cfg.get("compute", {})
-                compute_aws_cfg = compute_cfg.get("aws", {}) if compute_cfg.get("provider") == "aws" else {}
-                eon_cfg = vertica_cfg.get("eon", {})
-                
-                cfg.setdefault("cluster_name", vertica_cfg.get("cluster_name", cfg["cluster_name"]))
-                cfg.setdefault("db_name", vertica_cfg.get("database", {}).get("name", cfg["db_name"]))
-                cfg.setdefault("db_user", vertica_cfg.get("database", {}).get("admin_username", cfg["db_user"]))
-                cfg.setdefault("db_password", vertica_cfg.get("database", {}).get("admin_password", cfg["db_password"]))
-                cfg.setdefault("eon_mode", vertica_cfg.get("mode", "").lower() == "eon" or bool(vertica_cfg.get("communal_storage")) or bool(eon_cfg.get("communal_storage_location")))
-                cfg.setdefault("region", compute_aws_cfg.get("region", aws_cfg.get("region", cfg["region"])))
-                cfg.setdefault("instance_type", compute_aws_cfg.get("instance_type", aws_cfg.get("instance_type", cfg["instance_type"])))
-                cfg["key_name"] = cfg["key_name"] or compute_aws_cfg.get("key_name") or aws_cfg.get("key_name")
-                cfg["connect_via_public_ip"] = cfg["connect_via_public_ip"] or compute_aws_cfg.get("connect_via_public_ip")
-                cfg["run_db_create_inline"] = cfg["run_db_create_inline"] or compute_aws_cfg.get("run_db_create_inline")
-                cfg.setdefault("communal_path", eon_cfg.get("communal_storage_location", cfg["communal_path"]))
-                cfg.setdefault("s3_auth_mode", compute_aws_cfg.get("s3_auth_mode", cfg["s3_auth_mode"]))
-                cfg.setdefault("iam_instance_profile", compute_aws_cfg.get("iam_instance_profile", cfg["iam_instance_profile"]))
-                cfg.setdefault("aws_access_key_id", compute_aws_cfg.get("aws_access_key_id", cfg["aws_access_key_id"]))
-                cfg.setdefault("aws_secret_access_key", compute_aws_cfg.get("aws_secret_access_key", cfg["aws_secret_access_key"]))
-                cfg.setdefault("enable_s3_encryption", eon_cfg.get("enable_s3_encryption", False))
-                cfg.setdefault("communal_region", eon_cfg.get("aws_region", cfg["region"]))
+            yaml_cfg = yaml.safe_load(f) or {}
+
+        vertica_cfg = yaml_cfg.get("vertica", {}) or {}
+        aws_cfg = yaml_cfg.get("aws", {}) or {}
+        compute_cfg = yaml_cfg.get("compute", {}) or {}
+        compute_aws_cfg = compute_cfg.get("aws", {}) if compute_cfg.get("provider") == "aws" else {}
+        eon_cfg = vertica_cfg.get("eon", {}) or {}
+        db_cfg = vertica_cfg.get("database", {}) or {}
+
+        cfg["cluster_name"] = vertica_cfg.get("cluster_name")
+        cfg["node_count"] = vertica_cfg.get("nodes", {}).get("count")
+        cfg["instance_type"] = compute_aws_cfg.get("instance_type") or aws_cfg.get("instance_type")
+        cfg["region"] = compute_aws_cfg.get("region") or aws_cfg.get("region")
+        cfg["db_name"] = db_cfg.get("name")
+        cfg["db_user"] = db_cfg.get("admin_username")
+        cfg["db_password"] = db_cfg.get("admin_password")
+        cfg["data_path"] = vertica_cfg.get("nodes", {}).get("data_path")
+        cfg["catalog_path"] = vertica_cfg.get("nodes", {}).get("catalog_path")
+        cfg["key_name"] = compute_aws_cfg.get("key_name") or aws_cfg.get("key_name")
+        cfg["connect_via_public_ip"] = compute_aws_cfg.get("connect_via_public_ip")
+        cfg["run_db_create_inline"] = compute_aws_cfg.get("run_db_create_inline")
+        cfg["s3_auth_mode"] = compute_aws_cfg.get("s3_auth_mode")
+        cfg["iam_instance_profile"] = compute_aws_cfg.get("iam_instance_profile")
+        cfg["aws_access_key_id"] = eon_cfg.get("aws_access_key_id") or compute_aws_cfg.get("aws_access_key_id") or aws_cfg.get("aws_access_key_id")
+        cfg["aws_secret_access_key"] = eon_cfg.get("aws_secret_access_key") or compute_aws_cfg.get("aws_secret_access_key") or aws_cfg.get("aws_secret_access_key")
+        cfg["communal_path"] = eon_cfg.get("communal_storage_location") or vertica_cfg.get("communal_storage")
+        cfg["communal_region"] = eon_cfg.get("aws_region") or compute_aws_cfg.get("region") or aws_cfg.get("region")
+        cfg["enable_s3_encryption"] = eon_cfg.get("enable_s3_encryption")
+        cfg["shard_count"] = eon_cfg.get("shard_count") or vertica_cfg.get("nodes", {}).get("shard_count")
+        cfg["eon_mode"] = (
+            str(vertica_cfg.get("mode", "")).lower() == "eon"
+            or bool(cfg.get("communal_path"))
+        )
+
+    # Override with Pulumi config (if explicitly set)
+    if config.get("cluster_name") is not None:
+        cfg["cluster_name"] = config.get("cluster_name")
+    if config.get("node_count") is not None:
+        cfg["node_count"] = int(config.get("node_count"))
+    if config.get("instance_type") is not None:
+        cfg["instance_type"] = config.get("instance_type")
+    if config.get("region") is not None:
+        cfg["region"] = config.get("region")
+    if config.get("db_name") is not None:
+        cfg["db_name"] = config.get("db_name")
+    if config.get("db_user") is not None:
+        cfg["db_user"] = config.get("db_user")
+    if config.get_secret("db_password") is not None:
+        cfg["db_password"] = config.get_secret("db_password")
+    if config.get_bool("eon_mode") is not None:
+        cfg["eon_mode"] = config.get_bool("eon_mode")
+    if config.get("shard_count") is not None:
+        cfg["shard_count"] = int(config.get("shard_count"))
+    if config.get("data_path") is not None:
+        cfg["data_path"] = config.get("data_path")
+    if config.get("catalog_path") is not None:
+        cfg["catalog_path"] = config.get("catalog_path")
+    if config.get("communal_path") is not None:
+        cfg["communal_path"] = config.get("communal_path")
+    if config.get("key_name") is not None:
+        cfg["key_name"] = config.get("key_name")
+    if config.get("action") is not None:
+        cfg["action"] = config.get("action")
+    if config.get("s3_auth_mode") is not None:
+        cfg["s3_auth_mode"] = config.get("s3_auth_mode")
+    if config.get("aws_access_key_id") is not None:
+        cfg["aws_access_key_id"] = config.get("aws_access_key_id")
+    if config.get_secret("aws_secret_access_key") is not None:
+        cfg["aws_secret_access_key"] = config.get_secret("aws_secret_access_key")
+    if config.get("iam_instance_profile") is not None:
+        cfg["iam_instance_profile"] = config.get("iam_instance_profile")
+    if config.get_bool("connect_via_public_ip") is not None:
+        cfg["connect_via_public_ip"] = config.get_bool("connect_via_public_ip")
+    if config.get_bool("run_db_create_inline") is not None:
+        cfg["run_db_create_inline"] = config.get_bool("run_db_create_inline")
+
+    # Apply hardcoded defaults only for values still missing
+    defaults = {
+        "cluster_name": "vertica-cluster",
+        "node_count": 3,
+        "instance_type": "r6i.2xlarge",
+        "region": "us-east-1",
+        "db_name": "analytics",
+        "db_user": "dbadmin",
+        "db_password": "",
+        "eon_mode": False,
+        "shard_count": 6,
+        "data_path": "/data/vertica",
+        "catalog_path": "/data/catalog",
+        "communal_path": "",
+        "key_name": "",
+        "action": "create",
+        "s3_auth_mode": "iam_role",
+        "aws_access_key_id": "",
+        "aws_secret_access_key": "",
+        "iam_instance_profile": "",
+        "connect_via_public_ip": False,
+        "run_db_create_inline": False,
+        "enable_s3_encryption": False,
+        "communal_region": cfg.get("region", "us-east-1"),
+    }
+
+    for key, value in defaults.items():
+        if cfg.get(key) is None or cfg.get(key) == "":
+            # Preserve explicit empty string only if it's a valid intentional value
+            if key in ("aws_access_key_id", "aws_secret_access_key", "iam_instance_profile", "communal_path"):
+                cfg[key] = cfg.get(key, value)
+            else:
+                cfg[key] = value
+
+    cfg["config_file"] = config_file
 
     return cfg
 
