@@ -322,6 +322,7 @@ class VerticaEonInstaller:
             perm_cmd = (
                 f"sudo bash -c 'chown -R dbadmin:verticadba /opt/vertica/config 2>/dev/null; "
                 f"chmod 755 /opt/vertica/config 2>/dev/null; "
+                f"mkdir -p /opt/vertica/log && chown dbadmin:verticadba /opt/vertica/log && chmod 755 /opt/vertica/log; "
                 f"mkdir -p {self.depot_path} && "
                 f"chown dbadmin:verticadba {self.depot_path} && "
                 f"chmod 755 {self.depot_path}'"
@@ -499,7 +500,9 @@ class VerticaEonInstaller:
         # Vertica commands must run as the dbadmin OS user.
         # Write the command to a script and execute it with su to avoid quoting hell.
         script_content = f"""#!/bin/bash
+set -e
 export PATH=$PATH:/opt/vertica/bin
+echo "Running as user: $(whoami), uid: $(id -u), groups: $(id -G)"
 /opt/vertica/bin/{vcluster_cmd}
 """
         script_path = "/tmp/vcluster_create_db.sh"
