@@ -332,6 +332,15 @@ chown -R dbadmin:verticadba {cfg["data_path"]} {cfg["catalog_path"]} 2>/dev/null
 echo "Bootstrap complete for {instance_name}"
 """
     
+    # EC2's iam_instance_profile argument expects the *name* of the profile,
+    # not the InstanceProfile resource object. Resolve it here.
+    if instance_profile is None:
+        profile_name = None
+    elif isinstance(instance_profile, str):
+        profile_name = instance_profile
+    else:
+        profile_name = instance_profile.name
+
     instance = aws.ec2.Instance(
         instance_name,
         ami=ami.id,
@@ -340,7 +349,7 @@ echo "Bootstrap complete for {instance_name}"
         vpc_security_group_ids=[sg.id],
         key_name=cfg["key_name"] if cfg["key_name"] else None,
         user_data=user_data,
-        iam_instance_profile=instance_profile if instance_profile else None,
+        iam_instance_profile=profile_name,
         root_block_device=aws.ec2.InstanceRootBlockDeviceArgs(
             volume_size=100,
             volume_type="gp3",
