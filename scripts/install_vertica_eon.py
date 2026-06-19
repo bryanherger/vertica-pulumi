@@ -556,14 +556,18 @@ class VerticaEonInstaller:
         # Add certificate files if generated
         if self.generate_certs:
             cmd_parts.extend([
-                "--cert-file", "/opt/vertica/config/share/nma_cert.pem",
-                "--key-file", "/opt/vertica/config/share/nma_key.pem"
+                "--cert-file", "/opt/vertica/config/https_certs/dbadmin.pem",
+                "--key-file", "/opt/vertica/config/https_certs/dbadmin.key"
             ])
         
         # Skip package install (we already installed)
         cmd_parts.append("--skip-package-install")
         
         vcluster_cmd = " ".join(cmd_parts)
+
+        # Build a redacted command for display only
+        display_cmd_parts = [p if p != self.admin_password else "***" for p in cmd_parts]
+        display_cmd = " ".join(display_cmd_parts)
 
         # Vertica commands must run as the dbadmin OS user.
         # Write the command to a script and execute it with su to avoid quoting hell.
@@ -578,7 +582,7 @@ echo "Running as user: $(whoami), uid: $(id -u), groups: $(id -G)"
             f.write(script_content)
 
         print(f"\n  Executing vcluster command...")
-        print(f"  Command: /opt/vertica/bin/{vcluster_cmd}")
+        print(f"  Command: /opt/vertica/bin/{display_cmd}")
 
         # Upload script to primary node
         rc, _, err = self._scp(script_path, f"{script_path}", primary_ip)
