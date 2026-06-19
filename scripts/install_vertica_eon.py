@@ -366,14 +366,14 @@ class VerticaEonInstaller:
                 else:
                     print(f"    License installed")
 
-            # Fix permissions
+            # Fix permissions and create Vertica data directories
             perm_cmd = (
                 f"sudo bash -c 'chown -R dbadmin:verticadba /opt/vertica/config 2>/dev/null; "
                 f"chmod 755 /opt/vertica/config 2>/dev/null; "
                 f"mkdir -p /opt/vertica/log && chown dbadmin:verticadba /opt/vertica/log && chmod 755 /opt/vertica/log; "
-                f"mkdir -p {self.depot_path} && "
-                f"chown dbadmin:verticadba {self.depot_path} && "
-                f"chmod 755 {self.depot_path}'"
+                f"mkdir -p /data/catalog /data/vertica {self.depot_path} && "
+                f"chown dbadmin:verticadba /data/catalog /data/vertica {self.depot_path} && "
+                f"chmod 755 /data/catalog /data/vertica {self.depot_path}'"
             )
             rc, out, err = self._ssh(ip, perm_cmd, sudo=False, timeout=60)
             if rc != 0:
@@ -562,6 +562,9 @@ class VerticaEonInstaller:
         
         # Skip package install (we already installed)
         cmd_parts.append("--skip-package-install")
+        
+        # Force removal of pre-existing database directories if they exist
+        cmd_parts.append("--force-removal-at-creation")
         
         vcluster_cmd = " ".join(cmd_parts)
 
