@@ -437,34 +437,48 @@ class VerticaEonInstaller:
         for ip in self.instance_ips:
             print(f"  Starting NMA on {ip}...")
 
-            # Try to start NMA
-            start_cmd = (
-                f"systemctl enable vertica-nma 2>/dev/null; "
-                f"systemctl start vertica-nma 2>/dev/null || "
-                f"/opt/vertica/sbin/vertica-nma start 2>/dev/null || "
-                f"echo 'NMA start attempted'"
+            # Ensure standard HTTPS cert directory exists and certs are in place.
+            # NMA looks in /opt/vertica/config/https_certs by default.  If our
+            # generated certs live elsewhere, copy them to the standard names.
+            cert_setup_cmd = (
+                f"mkdir -p /opt/vertica/config/https_certs && "
+                f"chown dbadmin:verticadba /opt/vertica/config/https_certs && "
+                f"chmod 755 /opt/vertica/config/https_certs && "
+                f"if [ -f /opt/vertica/config/share/nma_cert.pem ]; then "
+                f"  cp /opt/vertica/config/share/nma_cert.pem /opt/vertica/config/https_certs/dbadmin.pem && "
+                f"  cp /opt/vertica/config/share/nma_key.pem /opt/vertica/config/https_certs/dbadmin.key && "
+                f"  cp /opt/vertica/config/share/nma_cert.pem /opt/vertica/config/https_certs/rootca.pem; "
+                f"fi && "
+                f"chown -R dbadmin:verticadba /opt/vertica/config/https_certs && "
+                f"chmod 600 /opt/vertica/config/https_certs/*.key 2>/dev/null || true"
             )
+            self._ssh(ip, cert_setup_cmd, sudo=True, timeout=60)
 
+            # Start NMA using the Vertica-supported script
+            start_cmd = (
+                f"sudo -u dbadmin /opt/vertica/bin/manage_node_agent.sh start node_management_agent"
+            )
             rc, out, err = self._ssh(ip, start_cmd, sudo=True, timeout=60)
             if rc != 0:
                 print(f"    WARNING: NMA start may have issues: {err}")
+                print(f"    Output: {out.strip()}")
             else:
-                print(f"    NMA started")
+                print(f"    NMA start script executed")
 
             # Wait a moment for NMA to initialize
-            time.sleep(2)
+            time.sleep(5)
 
-            # Verify NMA is running
+            # Verify NMA health by checking the HTTPS endpoint from inside the node
             check_cmd = (
-                f"systemctl is-active vertica-nma 2>/dev/null || "
-                f"ps aux | grep -q 'vertica-nma' && echo 'running' || echo 'not running'"
+                f"curl -fsSk https://localhost:5554/v1/health 2>&1 || "
+                f"(sleep 3 && curl -fsSk https://localhost:5554/v1/health 2>&1) || "
+                f"echo 'NMA_NOT_HEALTHY'"
             )
-
             rc, out, err = self._ssh(ip, check_cmd, sudo=True, timeout=30)
-            if 'running' in out.lower() or 'active' in out.lower():
-                print(f"    NMA is running")
+            if 'healthy' in out.lower():
+                print(f"    NMA is healthy")
             else:
-                print(f"    WARNING: NMA may not be running. Output: {out.strip()}")
+                print(f"    WARNING: NMA may not be running. Output: {out.strip()} {err.strip()}")
                 all_success = False
 
         return all_success
