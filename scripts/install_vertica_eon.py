@@ -931,11 +931,11 @@ echo "Running as user: $(whoami), uid: $(id -u), groups: $(id -G)"
                     f"set -x; "
                     f"echo 'DEBUG: running as user $(whoami) on host $(hostname)'; "
                     f"echo 'DEBUG: primary_ip={primary_ip} db_name={self.db_name} user={self.admin_username}'; "
-                    f"su - dbadmin -c \"timeout 60 /opt/vertica/bin/vsql -h {primary_ip} -U {self.admin_username} "
-                    f"-d {self.db_name} -w '{self.admin_password}' -X -c '{sync_sql}'\""
+                    f"sudo -u dbadmin timeout 60 /opt/vertica/bin/vsql -h {primary_ip} -U {self.admin_username} "
+                    f"-d {self.db_name} -w '{self.admin_password}' -X -c '{sync_sql}'"
                 )
                 print(f"  DEBUG sync command: {sync_cmd}")
-                rc_sync, out_sync, err_sync = self._ssh(primary_ip, sync_cmd, timeout=130)
+                rc_sync, out_sync, err_sync = self._ssh(primary_ip, sync_cmd, timeout=90)
                 print(f"  DEBUG sync rc={rc_sync}")
                 print(f"  DEBUG sync stdout: {out_sync.strip()}")
                 print(f"  DEBUG sync stderr: {err_sync.strip()}")
@@ -969,11 +969,11 @@ echo "Running as user: $(whoami), uid: $(id -u), groups: $(id -G)"
         check_cmd = (
             f"set -x; "
             f"echo 'DEBUG: running as user $(whoami) on host $(hostname)'; "
-            f"su - dbadmin -c \"timeout 60 /opt/vertica/bin/vsql -h {primary_ip} -U {self.admin_username} "
-            f"-d {self.db_name} -w '{self.admin_password}' -X -c '{version_sql}'\""
+            f"sudo -u dbadmin timeout 60 /opt/vertica/bin/vsql -h {primary_ip} -U {self.admin_username} "
+            f"-d {self.db_name} -w '{self.admin_password}' -X -c '{version_sql}'"
         )
         print(f"  DEBUG version command: {check_cmd}")
-        rc, out, err = self._ssh(primary_ip, check_cmd, timeout=130)
+        rc, out, err = self._ssh(primary_ip, check_cmd, timeout=90)
         print(f"  DEBUG version rc={rc}")
         print(f"  DEBUG version stdout: {out.strip()}")
         print(f"  DEBUG version stderr: {err.strip()}")
@@ -986,11 +986,11 @@ echo "Running as user: $(whoami), uid: $(id -u), groups: $(id -G)"
             nodes_sql = "SELECT * FROM nodes;"
             nodes_cmd = (
                 f"set -x; "
-                f"su - dbadmin -c \"timeout 60 /opt/vertica/bin/vsql -h {primary_ip} -U {self.admin_username} "
-                f"-d {self.db_name} -w '{self.admin_password}' -X -c '{nodes_sql}'\""
+                f"sudo -u dbadmin timeout 60 /opt/vertica/bin/vsql -h {primary_ip} -U {self.admin_username} "
+                f"-d {self.db_name} -w '{self.admin_password}' -X -c '{nodes_sql}'"
             )
             print(f"  DEBUG nodes command: {nodes_cmd}")
-            rc, out, err = self._ssh(primary_ip, nodes_cmd, timeout=130)
+            rc, out, err = self._ssh(primary_ip, nodes_cmd, timeout=90)
             print(f"  DEBUG nodes rc={rc}")
             print(f"  DEBUG nodes stdout: {out.strip()}")
             print(f"  DEBUG nodes stderr: {err.strip()}")
