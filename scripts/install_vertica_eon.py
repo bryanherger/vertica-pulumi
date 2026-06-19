@@ -630,7 +630,6 @@ openssl ca -config vertica_https_openssl.cnf \\
         print("  Running local certificate generation script...")
         result = subprocess.run(
             ["bash", str(cert_script)],
-            cwd=str(certs_dir),
             capture_output=True,
             text=True,
             timeout=120
