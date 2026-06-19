@@ -64,6 +64,16 @@ class VerticaEonInstaller:
         else:
             self.instance_ips = self._get_instance_ips()
 
+        # Get private IPs for internal Vertica communication (vcluster hosts)
+        if config.get('_instance_private_ips'):
+            self.instance_private_ips = config['_instance_private_ips']
+        else:
+            self.instance_private_ips = self._get_instance_private_ips()
+
+        # If no private IPs found, fall back to public IPs for vcluster hosts
+        if not self.instance_private_ips:
+            self.instance_private_ips = self.instance_ips
+
         # Eon Mode settings
         self.communal_storage = self.eon_config.get('communal_storage_location', '')
         self.shard_count = self.eon_config.get('shard_count', 3)
@@ -96,7 +106,7 @@ class VerticaEonInstaller:
         self.generate_certs = self.security_config.get('generate_nma_certs', True)
 
     def _get_instance_ips(self) -> List[str]:
-        """Get instance IPs from Pulumi outputs or config"""
+        """Get instance public IPs from Pulumi outputs or config"""
         # Try the aggregated instance_ips output first
         try:
             result = subprocess.run(
@@ -135,6 +145,43 @@ class VerticaEonInstaller:
         if hosts:
             return [h['ip'] for h in hosts]
 
+        return []
+
+    def _get_instance_private_ips(self) -> List[str]:
+        """Get instance private IPs from Pulumi outputs for internal Vertica communication."""
+        # Try the aggregated instance_private_ips output first
+        try:
+            result = subprocess.run(
+                ["pulumi", "stack", "output", "instance_private_ips", "--json"],
+                capture_output=True, text=True, check=True
+            )
+            ips = json.loads(result.stdout)
+            if isinstance(ips, list) and len(ips) > 0:
+                return ips
+        except (subprocess.CalledProcessError, json.JSONDecodeError):
+            pass
+
+        # Fallback: try individual node_*_private_ip outputs
+        ips = []
+        node = 1
+        while True:
+            try:
+                result = subprocess.run(
+                    ["pulumi", "stack", "output", f"node_{node}_private_ip", "--json"],
+                    capture_output=True, text=True, check=True
+                )
+                ip = json.loads(result.stdout)
+                if ip:
+                    ips.append(ip)
+                    node += 1
+                else:
+                    break
+            except (subprocess.CalledProcessError, json.JSONDecodeError):
+                break
+        if ips:
+            return ips
+
+        # Fallback to public IPs if no private IPs found
         return []
 
     def _ssh(self, ip: str, command: str, timeout: int = 300,
@@ -428,12 +475,16 @@ class VerticaEonInstaller:
             print("ERROR: No instance IPs available")
             return False
         
+        if not self.instance_private_ips:
+            print("ERROR: No instance private IPs available")
+            return False
+        
         if not self.communal_storage:
             print("ERROR: Communal storage location not configured")
             return False
         
         primary_ip = self.instance_ips[0]
-        hosts = ",".join(self.instance_ips)
+        hosts = ",".join(self.instance_private_ips)
         
         action = "Create" if self.db_init == "create" else "Revive"
         cmd_action = "create_db" if self.db_init == "create" else "revive_db"

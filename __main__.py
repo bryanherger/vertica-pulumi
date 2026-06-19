@@ -372,12 +372,10 @@ for i, instance in enumerate(instances):
     pulumi.export(f"node_{i+1}_public_ip", instance.public_ip)
 
 # Export aggregated instance IPs (public or private based on config)
-instance_ips = pulumi.Output.all(
-    *[inst.public_ip for inst in instances]
-).apply(lambda ips: list(ips)) if cfg.get("connect_via_public_ip") else pulumi.Output.all(
-    *[inst.private_ip for inst in instances]
-).apply(lambda ips: list(ips))
-pulumi.export("instance_ips", instance_ips)
+public_ips = pulumi.Output.all(*[inst.public_ip for inst in instances]).apply(lambda ips: list(ips))
+private_ips = pulumi.Output.all(*[inst.private_ip for inst in instances]).apply(lambda ips: list(ips))
+pulumi.export("instance_ips", public_ips)
+pulumi.export("instance_private_ips", private_ips)
 # Export cluster info
 pulumi.export("cluster_name", cfg["cluster_name"])
 pulumi.export("node_count", cfg["node_count"])
