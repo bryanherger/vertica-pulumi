@@ -934,8 +934,14 @@ echo "Running as user: $(whoami), uid: $(id -u), groups: $(id -G)"
                     print("  Catalog synced successfully")
                     print("  IMPORTANT: Data is now persisted to S3 communal storage")
                 else:
-                    print(f"  WARNING: Catalog sync may have issues")
-                    print(f"  Output: {out_sync}")
+                    print(f"  WARNING: Catalog sync returned non-zero exit code {rc_sync}")
+                    print(f"  Output: {out_sync.strip()}")
+                    if err_sync.strip():
+                        print(f"  Error: {err_sync.strip()}")
+
+            # Give the database a moment to finish recovery before verification
+            print("  Waiting 15 seconds for database to stabilize...")
+            time.sleep(15)
 
             return True
         else:
@@ -951,13 +957,13 @@ echo "Running as user: $(whoami), uid: $(id -u), groups: $(id -G)"
 
         print(f"\nVerifying database '{self.db_name}'...")
 
-        # Check if database is up
+        # Check if database is up (force TCP via node IP; avoids AWS local socket issues)
         check_cmd = (
-            f"su - dbadmin -c \"/opt/vertica/bin/vsql -U {self.admin_username} "
+            f"su - dbadmin -c \"/opt/vertica/bin/vsql -h {primary_ip} -U {self.admin_username} "
             f"-d {self.db_name} -w '{self.admin_password}' -c 'SELECT version();'\""
         )
 
-        rc, out, err = self._ssh(primary_ip, check_cmd, timeout=60)
+        rc, out, err = self._ssh(primary_ip, check_cmd, timeout=180)
 
         if rc == 0 and "Vertica" in out:
             print(f"  Database is running!")
@@ -965,19 +971,21 @@ echo "Running as user: $(whoami), uid: $(id -u), groups: $(id -G)"
 
             # Check nodes
             nodes_cmd = (
-                f"su - dbadmin -c \"/opt/vertica/bin/vsql -U {self.admin_username} "
+                f"su - dbadmin -c \"/opt/vertica/bin/vsql -h {primary_ip} -U {self.admin_username} "
                 f"-d {self.db_name} -w '{self.admin_password}' -c 'SELECT * FROM nodes;'\""
             )
 
-            rc, out, err = self._ssh(primary_ip, nodes_cmd, timeout=60)
+            rc, out, err = self._ssh(primary_ip, nodes_cmd, timeout=180)
             if rc == 0:
                 print(f"\n  Nodes:\n{out}")
+            else:
+                print(f"  Node query failed: {err.strip()}")
 
             return True
         else:
             print(f"  Database verification failed")
-            print(f"  Output: {out}")
-            print(f"  Error: {err}")
+            print(f"  Output: {out.strip()}")
+            print(f"  Error: {err.strip()}")
             return False
 
     def run(self, rpm_path: str, license_path: str = "") -> bool:
