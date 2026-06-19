@@ -63,7 +63,7 @@ class NMACertificateGenerator:
 
     def generate_certificates(self) -> Tuple[str, str, str]:
         """
-        Generate CA and server certificates for NMA HTTPS.
+        Generate CA and server certificates for NMA/Vertica HTTPS.
 
         Returns:
             Tuple of (server_cert_path, server_key_path, ca_cert_path)
@@ -73,6 +73,7 @@ class NMACertificateGenerator:
         print(f"  Organization: {self.organization}")
         print(f"  Common Name: {self.common_name}")
         print(f"  Validity: {self.validity_days} days")
+        print(f"  Hosts: {', '.join(self.hosts)}")
 
         out_dir = self.output_dir
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -82,6 +83,40 @@ class NMACertificateGenerator:
         server_key_path = out_dir / "nma_key.pem"
         server_csr_path = out_dir / "nma_csr.pem"
         server_cert_path = out_dir / "nma_cert.pem"
+        openssl_config = out_dir / "openssl.cnf"
+
+        # Build subjectAltName string with all node IPs and localhost
+        san_entries = ["DNS:localhost"]
+        for i, host in enumerate(self.hosts):
+            san_entries.append(f"IP:{host}")
+            san_entries.append(f"DNS:vertica-eon-cluster-node-{i+1}")
+        san = ",".join(san_entries)
+
+        # OpenSSL config with extensions required by Vertica NMA/HTTPS service
+        config_content = f"""[req]
+distinguished_name = req_distinguished_name
+req_extensions = v3_req
+x509_extensions = v3_ca
+prompt = no
+
+[req_distinguished_name]
+C = {self.country}
+O = {self.organization}
+CN = {self.common_name}
+
+[v3_req]
+basicConstraints = CA:FALSE
+keyUsage = digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth, clientAuth
+subjectAltName = {san}
+
+[v3_ca]
+basicConstraints = CA:TRUE
+keyUsage = keyCertSign, cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always,issuer:always
+"""
+        openssl_config.write_text(config_content)
 
         # Generate CA private key
         print("  Generating 2048-bit CA private key...")
@@ -95,6 +130,8 @@ class NMACertificateGenerator:
         print("  Generating CA certificate...")
         subprocess.run([
             "openssl", "req", "-new", "-x509",
+            "-config", str(openssl_config),
+            "-extensions", "v3_ca",
             "-key", str(ca_key_path),
             "-out", str(ca_cert_path),
             "-days", str(self.validity_days),
@@ -109,16 +146,17 @@ class NMACertificateGenerator:
             "2048"
         ], check=True, capture_output=True)
 
-        # Generate server CSR
+        # Generate server CSR using the config
         print("  Generating server certificate signing request...")
         subprocess.run([
             "openssl", "req", "-new",
+            "-config", str(openssl_config),
             "-key", str(server_key_path),
             "-out", str(server_csr_path),
             "-subj", f"/C={self.country}/O={self.organization}/CN={self.common_name}"
         ], check=True, capture_output=True)
 
-        # Sign server certificate with CA
+        # Sign server certificate with CA, applying v3_req extensions
         print("  Signing server certificate with CA...")
         subprocess.run([
             "openssl", "x509", "-req",
@@ -126,6 +164,8 @@ class NMACertificateGenerator:
             "-CA", str(ca_cert_path),
             "-CAkey", str(ca_key_path),
             "-CAcreateserial",
+            "-extfile", str(openssl_config),
+            "-extensions", "v3_req",
             "-out", str(server_cert_path),
             "-days", str(self.validity_days),
             "-sha256"
