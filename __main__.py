@@ -303,7 +303,13 @@ instances = []
 for i in range(cfg["node_count"]):
     instance_name = f"{cfg['cluster_name']}-node-{i + 1}"
     
-    # User data for Vertica preparation
+    # User data for Vertica preparation (read bootstrap prerequisites from YAML)
+    bootstrap_cfg = cfg.get("bootstrap", {})
+    prereq_packages = " ".join(bootstrap_cfg.get("prerequisites", []))
+    extra_packages = " ".join(bootstrap_cfg.get("packages", []))
+    pre_install_cmds = "\n".join(f"{cmd}" for cmd in bootstrap_cfg.get("pre_install", []))
+    post_install_cmds = "\n".join(f"{cmd}" for cmd in bootstrap_cfg.get("post_install", []))
+
     user_data = f"""#!/bin/bash
 # Vertica node bootstrap
 hostnamectl set-hostname {instance_name}
@@ -311,11 +317,17 @@ echo "{instance_name}" > /etc/hostname
 
 # Install dependencies
 yum update -y
-yum install -y python3 python3-pip jq
+yum install -y python3 python3-pip jq {prereq_packages} {extra_packages}
+
+# Pre-install bootstrap steps
+{pre_install_cmds}
 
 # Create Vertica directories
 mkdir -p {cfg["data_path"]} {cfg["catalog_path"]}
 chown -R dbadmin:verticadba {cfg["data_path"]} {cfg["catalog_path"]} 2>/dev/null || true
+
+# Post-install bootstrap steps
+{post_install_cmds}
 
 echo "Bootstrap complete for {instance_name}"
 """

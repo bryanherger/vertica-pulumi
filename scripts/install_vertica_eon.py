@@ -264,25 +264,34 @@ class VerticaEonInstaller:
             # Install prerequisites
             print("    Installing prerequisites (dialog, psmisc, which, net-tools)...")
             prereq_cmd = (
-                "(command -v dnf >/dev/null 2>&1 && sudo dnf install -y dialog psmisc which net-tools) || "
-                "(command -v yum >/dev/null 2>&1 && sudo yum install -y dialog psmisc which net-tools) || "
-                "(command -v apt-get >/dev/null 2>&1 && sudo apt-get install -y dialog psmisc net-tools) || "
-                "echo 'WARNING: no supported package manager found'"
+                "if command -v dnf >/dev/null 2>&1; then "
+                "  sudo dnf install -y dialog psmisc which net-tools; "
+                "elif command -v yum >/dev/null 2>&1; then "
+                "  sudo yum install -y dialog psmisc which net-tools; "
+                "elif command -v apt-get >/dev/null 2>&1; then "
+                "  sudo apt-get install -y dialog psmisc net-tools; "
+                "else "
+                "  echo 'WARNING: no supported package manager found'; "
+                "fi"
             )
-            self._ssh(ip, prereq_cmd, sudo=True, timeout=180)
+            self._ssh(ip, prereq_cmd, sudo=False, timeout=180)
 
             # Try package-manager based install first (resolves dependencies)
             install_cmd = (
-                f"(command -v dnf >/dev/null 2>&1 && sudo dnf localinstall -y /tmp/{rpm_name}) || "
-                f"(command -v yum >/dev/null 2>&1 && sudo yum localinstall -y /tmp/{rpm_name}) || "
-                f"(sudo rpm -ivh --nodeps /tmp/{rpm_name} || sudo rpm -Uvh --nodeps /tmp/{rpm_name})"
+                "if command -v dnf >/dev/null 2>&1; then "
+                f"  sudo dnf localinstall -y /tmp/{rpm_name}; "
+                "elif command -v yum >/dev/null 2>&1; then "
+                f"  sudo yum localinstall -y /tmp/{rpm_name}; "
+                "else "
+                f"  sudo rpm -ivh --nodeps /tmp/{rpm_name} || sudo rpm -Uvh --nodeps /tmp/{rpm_name}; "
+                "fi"
             )
-            rc, out, err = self._ssh(ip, install_cmd, sudo=True, timeout=300)
+            rc, out, err = self._ssh(ip, install_cmd, sudo=False, timeout=300)
             if rc != 0:
                 print(f"    ERROR: RPM install failed: {err}")
                 print("    Attempting fallback install with --nodeps...")
                 fallback_cmd = f"sudo rpm -ivh --nodeps /tmp/{rpm_name} || sudo rpm -Uvh --nodeps /tmp/{rpm_name}"
-                rc, out, err = self._ssh(ip, fallback_cmd, sudo=True, timeout=300)
+                rc, out, err = self._ssh(ip, fallback_cmd, sudo=False, timeout=300)
                 if rc != 0:
                     print(f"    ERROR: Fallback RPM install also failed: {err}")
                     all_success = False
@@ -311,8 +320,8 @@ class VerticaEonInstaller:
 
             # Fix permissions
             perm_cmd = (
-                f"chown -R dbadmin:verticadba /opt/vertica/config && "
-                f"chmod 755 /opt/vertica/config && "
+                f"chown -R dbadmin:verticadba /opt/vertica/config 2>/dev/null; "
+                f"chmod 755 /opt/vertica/config 2>/dev/null; "
                 f"mkdir -p {self.depot_path} && "
                 f"chown dbadmin:verticadba {self.depot_path} && "
                 f"chmod 755 {self.depot_path}"
@@ -322,6 +331,15 @@ class VerticaEonInstaller:
                 print(f"    WARNING: Permission setup failed: {err}")
             else:
                 print(f"    Permissions set")
+
+            # Verify vcluster exists
+            check_cmd = "ls -la /opt/vertica/bin/vcluster 2>/dev/null || echo 'vcluster NOT FOUND'"
+            rc, out, err = self._ssh(ip, check_cmd, sudo=False, timeout=30)
+            if "vcluster NOT FOUND" in out:
+                print(f"    ERROR: Vertica did not install correctly (vcluster missing)")
+                all_success = False
+            else:
+                print(f"    Verified: {out.strip()}")
 
         return all_success
 
@@ -440,14 +458,13 @@ class VerticaEonInstaller:
             "--communal-storage-location", self.communal_storage,
             "--depot-path", self.depot_path,
             "--depot-size", self.depot_size,
-            "--username", self.admin_username,
         ]
         
         # Only add shard-count for create (not revive - existing count is used)
         if self.db_init == "create":
             cmd_parts.extend(["--shard-count", str(self.shard_count)])
         
-        # Add password if configured
+        # Add password if configured (vcluster uses --password, not --username)
         if self.admin_password:
             cmd_parts.extend(["--password", self.admin_password])
         
@@ -656,12 +673,11 @@ def main():
     )
     parser.add_argument(
         "--rpm-path",
-        required=True,
-        help="Path to Vertica RPM file"
+        help="Path to Vertica RPM file (or set vertica.rpm.local_path in config)"
     )
     parser.add_argument(
         "--license-path",
-        help="Path to Vertica license file"
+        help="Path to Vertica license file (or set vertica.license.local_path in config)"
     )
     parser.add_argument(
         "--communal-storage",
@@ -707,7 +723,27 @@ def main():
     if args.hosts:
         installer.instance_ips = [h.strip() for h in args.hosts.split(",")]
 
-    success = installer.run(args.rpm_path, args.license_path)
+    # Get RPM path from CLI or config
+    rpm_path = args.rpm_path
+    if not rpm_path:
+        rpm_path = config.get('vertica', {}).get('rpm', {}).get('local_path', '')
+        if not rpm_path:
+            print("ERROR: --rpm-path not provided and vertica.rpm.local_path not set in config")
+            sys.exit(1)
+    rpm_path = os.path.expanduser(rpm_path)
+
+    if not os.path.exists(rpm_path):
+        print(f"ERROR: RPM file not found: {rpm_path}")
+        sys.exit(1)
+
+    # Get license path from CLI or config
+    license_path = args.license_path
+    if not license_path:
+        license_path = config.get('vertica', {}).get('license', {}).get('local_path', '')
+        if license_path:
+            license_path = os.path.expanduser(license_path)
+
+    success = installer.run(rpm_path, license_path)
     sys.exit(0 if success else 1)
 
 
